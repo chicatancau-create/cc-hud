@@ -1,6 +1,7 @@
 import ctypes
 import ctypes.wintypes as wt
 import datetime as dt
+import re
 import glob, json, os, subprocess, sys, tempfile, time
 from importlib.machinery import SourceFileLoader
 if hasattr(sys.stdout, 'reconfigure'):
@@ -254,7 +255,7 @@ for exp in (False, True):
     print('    %s y=%d h=%d 底=%d ≤ 工作区底 %d → %s (期望 1)'
           % ('收起' if not exp else '展开', y0, hh, y0 + hh, wb, int(y0 + hh <= wb)))
 
-print('=== F. 跟随 CC Switch: 边沿判定 + 隐藏期间零读库 ===')
+print('=== F. 显示/隐藏边沿判定 + 隐藏期间零读库(不跟随模式) ===')
 reads = [0]
 _orig_read = h._read
 
@@ -273,6 +274,9 @@ print('  轮询 20 次耗时 %.1f ms (每次 %.2f ms, 3s 一轮 -> 占空比 %.3
       % ((time.perf_counter() - t0) * 1000, (time.perf_counter() - t0) * 50,
          (time.perf_counter() - t0) / 20 / 3.0 * 100))
 
+# 这一段验的是「隐藏 + 停止读库」那条路; 开了跟随的话掉线是直接退出(那是 X4 的事),
+# 所以这里先关掉跟随, 免得把主实例拆了后面全崩。
+h.follow = False
 m.ccswitch_pid = lambda: None                    # 假装 CC Switch 退出
 h._n = m.CC_TICKS - 1                            # 让这一拍真的去查进程
 h._tick()
@@ -290,7 +294,8 @@ h.root.update()
 on_mapped = h.root.winfo_ismapped()
 r2 = reads[0]
 m.ccswitch_pid = real
-print('  CC Switch 掉线 -> 已隐藏 %s (期望 1)' % int(not off_mapped))
+h.follow = True
+print('  不跟随模式下掉线 -> 已隐藏 %s (期望 1; 跟随模式下的掉线退出见 X4)' % int(not off_mapped))
 print('  隐藏期间到期刷新 读库次数 %d (期望 0)' % (r1 - r0))
 print('  CC Switch 上线 -> 已显示 %s, 读库 %d 次 (期望 1 / 1)' % (int(on_mapped), r2 - r1))
 h._read = _orig_read
@@ -1721,6 +1726,74 @@ zero = [b['reqs'] for b in d0w['htok']]
 print('  今日 24 格里 %d 格有请求 · 全零格不画柱(有请求但无 token 的源画短提示)'
       % sum(1 for v in zero if v))
 assert h.cv.find_withtag('fatal') == ()
+
+print('=== X. 跟随启停: 开机只判定一回 + CC Switch 退出则跟着退出 ===')
+# X1 启动文件夹里不该再有"直接启动 HUD"的快捷方式, 只该有判定器
+#     .lnk 用 Python 直接解: 目标路径与参数是文件里的 UTF-16LE 串, 不依赖 PowerShell 的递归
+startup = os.path.join(os.environ['APPDATA'], 'Microsoft', 'Windows', 'Start Menu',
+                       'Programs', 'Startup')
+assert os.path.isdir(startup), '找不到启动文件夹: %s' % startup
+
+
+def lnk_text(path):
+    raw = open(path, 'rb').read()
+    runs = re.findall(b'(?:[ -~]\x00){4,}', raw)
+    return ' '.join(r.decode('utf-16le', 'replace') for r in runs).lower()
+
+
+lnks = {f: lnk_text(os.path.join(startup, f)) for f in os.listdir(startup)
+        if f.lower().endswith('.lnk')}
+hud_direct = sorted(f for f, t in lnks.items() if 'cc-hud.pyw' in t)
+probe_lnk = sorted(f for f, t in lnks.items() if 'follow-probe.pyw' in t)
+print('  启动文件夹共 %d 个快捷方式 · 指向 HUD 本体 %s · 指向判定器 %s (期望 0 个 / 1 个)'
+      % (len(lnks), hud_direct, probe_lnk))
+for f in probe_lnk:
+    print('    %s -> %s' % (f, lnks[f][:150]))
+assert not hud_direct, 'HUD 还在开机自启名单里: %s' % hud_direct
+assert len(probe_lnk) == 1, '判定器的快捷方式没装对: %s' % list(lnks)
+
+# X2 判定函数的完整真值表(只判定一回 = 纯函数, 不轮询不常驻)
+from importlib.machinery import SourceFileLoader as _SFL
+probe = _SFL('probe', r'G:\AIrenwu\cc-hud\follow-probe.pyw').load_module()
+cases = [
+    (None, False, None, False),      # CC 没跑 -> 不起
+    (None, True, None, False),       # CC 没跑且 HUD 在(不该发生) -> 不起
+    (111, True, None, False),        # HUD 已有一份 -> 不起
+    (111, False, None, True),        # CC 在跑且没有 HUD -> 起
+    (111, False, 111, False),        # 用户在这个 CC 生命周期里主动退过 -> 不起
+    (111, False, 222, True),         # 标记属于上一个 CC 进程 -> 照常跟随
+    (111, True, 111, False),         # 三个条件同时 -> 不起
+    (222, False, 111, True),         # CC 重启换了 PID -> 恢复跟随
+]
+bad = [(c, r, probe.should_launch(c[0], c[1], c[2])) for c in cases
+       for r in [c[3]] if probe.should_launch(c[0], c[1], c[2]) != r]
+print('  判定真值表 %d 组, 判错 %d 组 (期望 0)' % (len(cases), len(bad)))
+assert not bad, bad
+
+# X3 mark_quit 与判定器真的联动(写盘 -> 判定器读到 -> 不再拉起)
+old_mark = probe.MARKER
+probe.MARKER = m.QUIT_MARK = os.path.join(tempfile.gettempdir(), 'hud-x3-marker')
+try:
+    os.path.exists(probe.MARKER) and os.remove(probe.MARKER)
+    h.mark_quit()
+    mk = probe.marker_pid()
+    print('  mark_quit 写入 %r · 判定器读到 %r · 再判定 %s (期望 有 PID / 同值 / False)'
+          % (open(probe.MARKER, encoding='utf-8').read(), mk,
+             probe.should_launch(mk, False, mk)))
+    assert mk and not probe.should_launch(mk, False, mk)
+finally:
+    if os.path.exists(probe.MARKER):
+        os.remove(probe.MARKER)
+    probe.MARKER = old_mark
+
+# X4 CC Switch 消失 -> HUD 跟着退出; 但挂着定时电源时不能退(否则取消不了关机)
+# X4「CC Switch 消失 -> HUD 跟着退出」这条只能在独立子进程里验(一个进程建两个 HUD 会共用
+#     模块级精灵缓存, ImageTk 位图绑定 Tcl 解释器, 第二个实例一隐藏就报 pyimage doesn't exist)。
+#     子进程实测结果见 %TEMP%/hud_follow_quit.py 的输出; 这里只钉住代码路径不被改坏。
+src4 = open(r'G:\AIrenwu\cc-hud\cc-hud.pyw', encoding='utf-8').read()
+assert '暂不跟随退出' in src4 and src4.count('self.quit()') >= 2,     '跟随退出的两条分支(有定时不退 / 无定时退)被改掉了'
+print('  跟随退出分支在位: 定时未清不退 %s · 无定时跟着 quit %s (期望 真 / 真)'
+      % (int('暂不跟随退出' in src4), int(src4.count('self.quit()') >= 2)))
 
 h.state.clear()
 h.state.update(ORIG_STATE)

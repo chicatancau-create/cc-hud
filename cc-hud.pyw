@@ -18,8 +18,11 @@ providers.json —— 那三处存明文 API key。两份库一律 mode=ro。
 刷新只就地改文字/坐标/颜色, 不销毁重建 -> 无闪烁。
 
 启动机制: 跟随器就是进程本身 —— 每 3s 用 Toolhelp32 快照查一次 cc-switch.exe,
-CC Switch 起来就显示, 退出就隐藏并停止读库(隐藏时零 SQL)。
-「启动文件夹\CC Switch HUD.lnk」让它开机常驻(命名互斥体保证只有一份)。
+CC Switch 起来就显示, 退出就跟着退出(隐藏期间零 SQL)。
+启动方式: 启动文件夹里放的是 **follow-probe.pyw**(不是本程序)。它在开机时只判定一回
+—— CC Switch 在跑才拉起本程序, 没跑就永久退出, 不常驻也不按计划重复。
+本程序运行中若发现 CC Switch 退出, 就跟着退出(除非还挂着定时电源, 见 _tick)。
+命名互斥体保证只有一份。
 隐藏后从系统托盘找回: 左键/双击 = 显示·隐藏互切, 右键 = 弹同一个菜单。
 托盘图标默认被 Windows 收在任务栏溢出菜单里, 要常驻需在
 「设置 → 个性化 → 任务栏 → 其他系统托盘图标」打开本项。
@@ -159,7 +162,7 @@ def haha_days(pdir):
     """
     days, per_sid, sids = {}, {}, set()
     ex = {'mreqs': {}, 'hours': {}, 'h1': 0, 'mtoks': {}, 'sid_models': {},
-          'htok': new_hourly()}
+          'htok': {}}     # htok 按本地日分桶, 由 fetch_haha 再按范围筛(区间级会多算别的日子)
     # mreqs/hours/mtoks 都按本地日分桶；sid_models 用于把索引库成本按真实
     # transcript 的本地日和模型 token 份额分摊，避免 UTC 日与本地日错位。
     if not pdir or not os.path.isdir(pdir):
@@ -207,7 +210,8 @@ def haha_days(pdir):
             mr[mdl] = mr.get(mdl, 0) + 1
             hr = ex['hours'].setdefault(dte, [0] * 24)
             hr[time.localtime(ep).tm_hour] += 1
-            hb = ex['htok'][time.localtime(ep).tm_hour]      # 逐小时四项(今日档条形要用)
+            hb = ex['htok'].setdefault(dte, new_hourly())[time.localtime(ep).tm_hour]
+            # 逐小时四项(今日档条形要用)
             hb['in'] += i
             hb['out'] += o
             hb['rd'] += r
@@ -228,6 +232,9 @@ def haha_days(pdir):
 
 NEWDAY = lambda: {'in': 0, 'out': 0, 'rd': 0, 'cc': 0, 'cost': 0.0, 'msgs': 0}
 STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'hud-state.json')
+# 「我在这个 CC Switch 生命周期里主动退过 HUD」的标记。判定器看到它就不要再拉起,
+# 否则用户点了退出、下一次判定又把它叫回来, 就成了流氓行为。
+QUIT_MARK = os.path.join(os.environ.get('TEMP', '.'), 'cc-hud-quit.marker')
 REFRESH_MS = 30_000
 POLL_MS = 150                                          # 界面心跳: 收托盘事件
 CC_TICKS = 20                                          # 每 20 拍(≈3s)查一次 CC Switch
@@ -1258,6 +1265,18 @@ def dur(ms):
     return '%d秒' % s
 
 
+def _fold_hours(per_day, d0):
+    """把按本地日分的 24 小时桶折成一个区间级 24 桶 —— 只折范围内的日子。
+    不筛就会把别的日子灌进今日档的柱子(实测 Σ小时 比总请求多出 607 次)。"""
+    out = new_hourly()
+    for dte, buckets in (per_day or {}).items():
+        if dte < d0:
+            continue
+        for hh, b in enumerate(buckets):
+            add_hour(out, hh, b['in'], b['out'], b['rd'], b['cc'], b['reqs'], b['cost'])
+    return out
+
+
 def fetch_haha(start):
     """cc-haha(Claude Code CLI 桌面壳)的索引库 —— 只读, 读不到就返回 None, 不算错误。
 
@@ -1385,7 +1404,7 @@ def fetch_haha(start):
         mmsgs = sum(v['msgs'] for v in by_day.values())
         return {'tok': int(mtok), 'cost': float(mcost), 'rd': int(mrd), 'fin': int(mfin),
                 'mcost': float(mcost), 'mtok': int(mtok), 'hourly': hourly,
-                'htok': ex['htok'],
+                'htok': _fold_hours(ex['htok'], local_d0),
                 'h1': int(ex['h1']),
                 'msgs': int(mmsgs), 'calls': int(calls), 'days': len(days), 'streak': streak,
                 'sess': int(ss[0] or 0), 'sub': int(ss[4] or 0), 'proj': int(ss[5] or 0),
@@ -2340,7 +2359,7 @@ class HUD:
         spec += [('check', '背景镂空  (只透底色, 文字不淡)', self._hollowed, self._hollow),
                  ('cmd', '取消置顶' if self._pinned else '保持置顶', self._topmost),
                  ('sep',),
-                 ('check', '跟随 CC Switch 显示', self.follow, self.set_follow),
+                 ('check', '跟随 CC Switch 启停', self.follow, self.set_follow),
                  ('info', ('CC Switch 运行中 · PID %d' % pid) if pid
                   else 'CC Switch 未运行 · 自动刷新已停(手动刷新仍会读库)')]
         spec += [('cmd', '立即隐藏  (圆点/托盘可再叫出)', self.hide_now)
@@ -2348,7 +2367,8 @@ class HUD:
         spec += [('sub', '定时操作', self.power_spec), ('sep',),
                  ('cmd', '复制对账数据 (JSON → 剪贴板)', self.copy_json),
                  ('cmd', '导出对账数据 (JSON → 文件)', self.export), ('sep',),
-                 ('cmd', '退出  (托盘图标一并消失)', self.quit)]
+                 ('cmd', '退出  (不再跟随, 下次 CC Switch 启动才恢复)',
+                  self.mark_quit_and_exit)]
         return spec
 
     def power_spec(self):
@@ -2582,6 +2602,18 @@ class HUD:
     def hide_now(self):
         self._set_visible(False)
 
+    def mark_quit_and_exit(self):
+        self.mark_quit()
+        self.quit()
+
+    def mark_quit(self):
+        """写下"当前这个 CC Switch 的 PID"。CC Switch 下次重启会换 PID, 标记自然失效。"""
+        try:
+            with open(QUIT_MARK, 'w', encoding='utf-8') as fh:
+                fh.write(str(ccswitch_pid() or 0))
+        except OSError:
+            pass
+
     def quit(self):
         for j in (getattr(self, '_job', None),):
             try:
@@ -2763,9 +2795,20 @@ class HUD:
                 up = ccswitch_pid() is not None
                 if up != self._cc_up:
                     self._cc_up = up
-                    self._set_visible(up)
-                    if self.tray:
-                        self.tray.set(self._shown, self._tip())
+                    if up:
+                        self._set_visible(True)
+                        if self.tray:
+                            self.tray.set(self._shown, self._tip())
+                    elif self.deadline or self.fired:
+                        # 唯一不能跟着退的情形: 定时电源已武装或已交给系统。
+                        # 退了就没有撤销口, 用户取消不了自己设的关机。
+                        self._set_visible(False)
+                        self.note = 'CC Switch 已退出 · 定时未清, 暂不跟随退出'
+                        if self.tray:
+                            self.tray.set(False, self._tip())
+                    else:
+                        self.quit()
+                        return
             if self.deadline and time.time() >= self.deadline:
                 self._fire()
             if self.deadline:
