@@ -2475,6 +2475,7 @@ class HUD:
         s = self.s
         self.root.geometry('+%d+%d' % self._corner())
         self._req_w = self.W          # 这一版尺寸就是刚按 self.W 定位的, 后面改尺寸要拿它算右上角
+        self._place_next = None       # 'center' = 这一次切换要把大面板放到屏幕正中 / 'corner' = 回到圆球那个角
 
         def F(px, fam='Microsoft YaHei UI', bold=False):
             return tkfont.Font(family=fam, size=-int(round(px * s)),
@@ -2783,6 +2784,7 @@ class HUD:
             self.root.geometry('+%d+%d' % self._corner())   # 从圆点那个角长出来, 不是回左上角
             self.root.deiconify()
             self.root.attributes('-topmost', self._pinned)
+            self.root.lift()     # 取消置顶后 deiconify 可能落在别的窗口后面 = "点了圆球没显示"
             self.refresh(True)
         else:
             self.root.withdraw()
@@ -3060,6 +3062,9 @@ class HUD:
 
     def toggle(self):
         self.expanded = not self.expanded
+        # 小→大: 第一次展开必须落在屏幕正中(用户点名)。大→小: 回到圆球那个角, 沿左下扩展。
+        # 只管"这一次切换" —— 之后用户怎么拖都不动它(拖动只靠 _clamp 保证不出屏)。
+        self._place_next = 'center' if self.expanded else 'corner'
         self.state['exp'] = self.expanded
         self._save()
         self.refresh(True)
@@ -3990,6 +3995,17 @@ class HUD:
             else:
                 self.root.geometry('%dx%d' % (self.W, self._H))   # 未映射时带坐标会被 WM 打回原位
             self._req_w = self.W
+        if self._place_next and self.root.winfo_ismapped():
+            # 尺寸已经落定(上面刚改完并 update_idletasks 过), 这时才谈得上"居中"。
+            # 放在 _clamp 之前: 居中本来就不会出屏, 万一工作区很小, 让 _clamp 兜住。
+            mode, self._place_next = self._place_next, None
+            if mode == 'center':
+                cl, ct, cr, cb = _work_area(hwnd=self.root.winfo_id())
+                self.root.geometry('+%d+%d' % (cl + max(0, (cr - cl - self.W)) // 2,
+                                               ct + max(0, (cb - ct - self._H)) // 2))
+            else:
+                self.root.geometry('+%d+%d' % self._corner())
+            self.root.update_idletasks()
         self._clamp()
 
     def _clamp(self):

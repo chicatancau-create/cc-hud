@@ -1,6 +1,6 @@
 # cc-hud
 
-Windows 桌面的 CC Switch 用量悬浮统计 HUD：单文件 tkinter 自绘面板，只读地把**本机八个 AI 客户端**的用量账合并成一个总量，并自带一套 A–Y 取证门禁（`verify.py`，26 段 109 条 assert，退出码 0 才算绿）。
+Windows 桌面的 CC Switch 用量悬浮统计 HUD：单文件 tkinter 自绘面板，只读地把**本机八个 AI 客户端**的用量账合并成一个总量，并自带一套 A–Z 取证门禁（`verify.py`，27 段 115 条 assert，退出码 0 才算绿）。
 
 本仓库面向代码审计者，因此下面「数据口径与守恒不变量」「已知未决」两节是重点——它们就是 bug 的藏身处和判定标准。
 
@@ -9,6 +9,7 @@ Windows 桌面的 CC Switch 用量悬浮统计 HUD：单文件 tkinter 自绘面
 - **八路合并**：CC Switch 代理库 + cc-haha(Claude Code 壳) + Qoder + Qoder CN + ZCode + 牧羊人(Herdsman) + Codex 未被 CC Switch 回填的会话 + **WorkBuddy 国内版与国外版**
 - **口径一致**：净 token 一路到底（回填类数据源的 `input_tokens` 含缓存读、WorkBuddy 还含缓存写，先拆再算），任何视图相加都等于总量
 - **双计保险**：每一路都按会话 id 与 CC Switch 求交集，一旦相交**整路拒绝并入**，宁可少计不双计
+- **面板落位**：点圆球 → 小面板一定浮到最前，并沿圆球**向左下方**展开（面板右上角钉在圆球右上角）；点「展开大面板」→ 大面板落在**工作区正中**（让开任务栏）。居中只管"小→大那一次切换"，之后随便拖，刷新不会把它拽回去（`verify.py` Z 段逐条量像素）
 - **今日档按小时条形图**：范围内只有一天时画不出跨天曲线，改为 24 根柱（柱=净 token，折线=成本）
 - **完全跟随 CC Switch 启停**：开机只判定一回（不常驻、不轮询），CC Switch 退出则 HUD 跟着退出
 - **定时电源**：到点关屏/睡眠/休眠/注销/重启/关机，带可撤销的系统级宽限，且跨 HUD 重启续用
@@ -42,7 +43,7 @@ python -c "import tkinter, sqlite3, ctypes; from PIL import Image, ImageDraw, Im
 # 1) 数据层单测（3 项，不碰界面）
 python -X utf8 -m unittest test_data -v
 
-# 2) 全量取证门禁（A–Y，26 段 109 条 assert，跑数分钟；退出码 0 = 全绿）
+# 2) 全量取证门禁（A–Z，27 段 115 条 assert，跑数分钟；退出码 0 = 全绿）
 python -X utf8 verify.py
 
 # 3) 跑起来（无控制台窗口）
@@ -61,7 +62,7 @@ python -X utf8 shot.py
 ```
 cc-hud.pyw          主程序（单文件）：数据层 fetch/merge_* → 版式 _layout/_cX → 绘制 paint
 follow-probe.pyw    开机一次性判定器（决定"要不要拉起 HUD"，判完即退）
-verify.py           A–Y 取证门禁套件
+verify.py           A–Z 取证门禁套件
 test_data.py        数据层单元测试（缓存失效、重复响应取末次、导出 URL 脱敏）
 shot.py             三条版式 + 镂空对照的 PrintWindow 实拍取证
 start-hud.bat       手动启动入口（pythonw + 无控制台）
@@ -157,6 +158,7 @@ hud-state.json      运行时用户偏好（已 gitignore，不入库）
 | V | ZCode / 牧羊人 / Codex 漏项 / Qoder CN 的口径与双计 |
 | W | 今日档小时条形：八路逐小时守恒、画法切换、悬停、无残留图元 |
 | X | 跟随启停：启动文件夹解析、判定真值表 8 组、退出标记联动 |
+| Z | 面板落位：展开大面板落在工作区正中（像素级）、拖完刷新不回弹、收起回到圆球右上角（向左下扩展）、点圆球一定映射出来且带 `WS_EX_TOPMOST` |
 | Y | WorkBuddy 两版：独立 `os.walk` 基线对账、**缓存拆桶不多不少**（净输入+命中+写 == Σprompt、四桶 == 应用自记 `total_tokens`）、每路四视图齐并、积分只认国内版（国外版硬断言并 0）、人造相交整路拒绝、缺目录降级、横幅 8 个槽位无空值 |
 
 ## 🐞 已知未决（审计起点）

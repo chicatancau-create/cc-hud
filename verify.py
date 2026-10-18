@@ -1970,6 +1970,60 @@ assert all(v for v in txtY.values()), '全部档横幅有空槽位(静默失效)
 assert '仅国内' in h.cv.itemcget(h.ids['wb.credl'], 'text'), '积分格没写明只有国内版给得出'
 assert '不并' in txtY['rt'], '说明行没交代国外版积分为何不并'
 
+print('=== Z. 展开必须居中 / 收起回到圆球那个角 / 点圆球一定浮到最前 ===')
+dd = int(round(m.PEEK * h.s))
+zl, zt, zr, zb = m._work_area(hwnd=h.root.winfo_id())
+h.expanded, h.wide = False, True
+h.refresh(True)
+settle()
+h.state['peek'] = [zr - dd - int(round(28 * h.s)), zt + int(round(36 * h.s))]
+h._set_visible(True)
+settle()
+h.toggle()                                   # 小 -> 大
+settle()
+zw, zh = h.root.winfo_width(), h.root.winfo_height()
+zx, zy = h.root.winfo_x(), h.root.winfo_y()
+ecx, ecy = zl + (zr - zl - zw) // 2, zt + (zb - zt - zh) // 2
+print('  展开后左上 (%d,%d) 尺寸 %dx%d · 工作区(%d,%d,%d,%d)正中应为 (%d,%d) · 偏 %d/%d px (期望 <=2)'
+      % (zx, zy, zw, zh, zl, zt, zr, zb, ecx, ecy, abs(zx - ecx), abs(zy - ecy)))
+assert abs(zx - ecx) <= 2 and abs(zy - ecy) <= 2, '大面板没落在屏幕正中'
+assert h._place_next is None, '居中标记没被消费 —— 那样每次刷新都会被拽回正中, 用户拖不动'
+# 居中只管"这一次切换": 之后拖到哪儿都该留在哪儿
+h.root.geometry('+%d+%d' % (zl + 40, zt + 40))
+h.refresh(True)
+settle()
+print('  拖到 (%d,%d) 后再刷新: 实测 (%d,%d) · 没被拽回 %s (期望 真)'
+      % (zl + 40, zt + 40, h.root.winfo_x(), h.root.winfo_y(),
+         int((h.root.winfo_x(), h.root.winfo_y()) == (zl + 40, zt + 40))))
+assert (h.root.winfo_x(), h.root.winfo_y()) == (zl + 40, zt + 40), '拖完之后刷新又被搬走了'
+# 大 -> 小: 回到圆球那个角, 且是"沿圆球向左下扩展"(右上角对齐圆点右上角, 不是左上角)
+h.toggle()
+settle()
+cx2, cy2 = h.root.winfo_x() + h.root.winfo_width(), h.root.winfo_y()
+wx2, wy2 = h.state['peek'][0] + dd, h.state['peek'][1]
+print('  收起后右上角 (%d,%d) vs 圆球右上角 (%d,%d) · 差 %d/%d (期望都 <=2 —— 向左下长)'
+      % (cx2, cy2, wx2, wy2, abs(cx2 - wx2), abs(cy2 - wy2)))
+assert abs(cx2 - wx2) <= 2 and abs(cy2 - wy2) <= 2, '收起态没沿圆球向左下扩展'
+# 点圆球唤回: 必须真的映射出来并浮在最前(用 Win32 的 WS_EX_TOPMOST 位判, 不信 attributes 的返回形状)
+h._set_visible(False)
+settle()
+px_, py_ = h._pk.winfo_x() + 9, h._pk.winfo_y() + 9
+Ev = lambda: type('E', (), {'x_root': px_, 'y_root': py_})()
+h._pk_down(Ev())
+h._pk_up(Ev())
+settle()
+mapped = bool(h.root.winfo_ismapped())
+_hw = ctypes.windll.user32.GetAncestor(h.root.winfo_id(), 3)          # GA_ROOT: 样式位在顶层窗口上
+_ex = ctypes.windll.user32.GetWindowLongW(_hw, -20)                  # GWL_EXSTYLE
+exs = _ex & 0x8                                                      # WS_EX_TOPMOST
+cx3 = h.root.winfo_x() + h.root.winfo_width()
+print('  点圆球: 面板映射 %s · EXSTYLE=0x%X 含 WS_EX_TOPMOST->%s · 右上角 %d vs 圆点右上角 %d (期望 真 / 真 / 差<=2)'
+      % (mapped, _ex & 0xFFFFFFFF, bool(exs), cx3, wx2))
+assert mapped and exs, '点圆球没把面板显示出来 / 没浮到最前'
+assert abs(cx3 - wx2) <= 2, '点圆球唤出的小面板没贴在圆球上'
+h.state['peek'] = [pk0[0], pk0[1]]
+h._save()
+
 h.state.clear()
 h.state.update(ORIG_STATE)
 if not h.deadline and not h.fired:            # 测试武装过的定时不能留在用户的状态文件里
