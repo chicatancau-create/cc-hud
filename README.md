@@ -1,13 +1,13 @@
 # cc-hud
 
-Windows 桌面的 CC Switch 用量悬浮统计 HUD：单文件 tkinter 自绘面板，只读地把**本机六个 AI 客户端**的用量账合并成一个总量，并自带一套 A–X 取证门禁（`verify.py`，112 条判据，退出码 0 才算绿）。
+Windows 桌面的 CC Switch 用量悬浮统计 HUD：单文件 tkinter 自绘面板，只读地把**本机八个 AI 客户端**的用量账合并成一个总量，并自带一套 A–Y 取证门禁（`verify.py`，26 段 109 条 assert，退出码 0 才算绿）。
 
 本仓库面向代码审计者，因此下面「数据口径与守恒不变量」「已知未决」两节是重点——它们就是 bug 的藏身处和判定标准。
 
 ## ✨ 功能特性
 
-- **六路合并**：CC Switch 代理库 + cc-haha(Claude Code 壳) + Qoder + Qoder CN + ZCode + 牧羊人(Herdsman) + Codex 未被 CC Switch 回填的会话
-- **口径一致**：净 token 一路到底（回填类数据源的 `input_tokens` 含缓存读，先减再算），任何视图相加都等于总量
+- **八路合并**：CC Switch 代理库 + cc-haha(Claude Code 壳) + Qoder + Qoder CN + ZCode + 牧羊人(Herdsman) + Codex 未被 CC Switch 回填的会话 + **WorkBuddy 国内版与国外版**
+- **口径一致**：净 token 一路到底（回填类数据源的 `input_tokens` 含缓存读、WorkBuddy 还含缓存写，先拆再算），任何视图相加都等于总量
 - **双计保险**：每一路都按会话 id 与 CC Switch 求交集，一旦相交**整路拒绝并入**，宁可少计不双计
 - **今日档按小时条形图**：范围内只有一天时画不出跨天曲线，改为 24 根柱（柱=净 token，折线=成本）
 - **完全跟随 CC Switch 启停**：开机只判定一回（不常驻、不轮询），CC Switch 退出则 HUD 跟着退出
@@ -18,7 +18,7 @@ Windows 桌面的 CC Switch 用量悬浮统计 HUD：单文件 tkinter 自绘面
 | 文件 | 内容 |
 |---|---|
 | `shot-today-bars.png` | 宽版 + 今日档小时条形图 |
-| `shot-wide.png` | 宽版（7 天档，趋势曲线 + 两排 4 卡 + 两条全宽横幅） |
+| `shot-wide.png` | 宽版（7 天档，趋势曲线 + 两排 4 卡 + 三条全宽横幅） |
 | `shot-expanded.png` | 展开竖版长条 |
 | `shot-collapsed.png` | 收起态小卡 |
 | `shot-solid.png` | 关掉键色镂空的对照图 |
@@ -42,7 +42,7 @@ python -c "import tkinter, sqlite3, ctypes; from PIL import Image, ImageDraw, Im
 # 1) 数据层单测（3 项，不碰界面）
 python -X utf8 -m unittest test_data -v
 
-# 2) 全量取证门禁（A–X，112 条判据，跑数分钟；退出码 0 = 全绿）
+# 2) 全量取证门禁（A–Y，26 段 109 条 assert，跑数分钟；退出码 0 = 全绿）
 python -X utf8 verify.py
 
 # 3) 跑起来（无控制台窗口）
@@ -61,7 +61,7 @@ python -X utf8 shot.py
 ```
 cc-hud.pyw          主程序（单文件）：数据层 fetch/merge_* → 版式 _layout/_cX → 绘制 paint
 follow-probe.pyw    开机一次性判定器（决定"要不要拉起 HUD"，判完即退）
-verify.py           A–X 取证门禁套件
+verify.py           A–Y 取证门禁套件
 test_data.py        数据层单元测试（缓存失效、重复响应取末次、导出 URL 脱敏）
 shot.py             三条版式 + 镂空对照的 PrintWindow 实拍取证
 start-hud.bat       手动启动入口（pythonw + 无控制台）
@@ -80,6 +80,8 @@ hud-state.json      运行时用户偏好（已 gitignore，不入库）
 | ZCode | `~\.zcode\cli\db\db.sqlite` → `model_usage` | 逐请求四项 token、模型、耗时 | 成本（本机不记钱） |
 | 牧羊人 Herdsman | `~\.herdsman\model_stats\events.jsonl` | 输入/输出 token、http_status、ttft | 缓存分项、成本 |
 | Codex 未回填 | `~\.codex\sessions` + `archived_sessions` | 会话级四项 token | 逐请求小时归属（只有会话级时间戳） |
+| WorkBuddy 国内版 | `~\.workbuddy\projects\**\*.jsonl` → `providerData.rawUsage` | 逐请求四项 token、模型、官方积分(credits) | 成本（本机不记美元）、状态码、延迟 |
+| WorkBuddy 国外版 | `~\.workbuddy-ai\projects\**\*.jsonl`（含 `subagents/`，归父会话） | 逐请求四项 token、模型 | **credits**（两本账互相矛盾，见下）、成本、状态码、延迟 |
 
 ### 净 token 口径（最容易出错的地方）
 
@@ -95,6 +97,12 @@ hud-state.json      运行时用户偏好（已 gitignore，不入库）
 - ZCode `model_usage`：含（`raw_usage_json.totalTokens = inputTokens + outputTokens`）→ 减
 - `session_log`（Claude 回填）：2872 行里 2803 行 `input < cache_read` → **不含，不减**
 - `proxy`：1093 行里 0 行 `input < cache_read` → 疑似也含，**当前未减**（见「已知未决」）
+- WorkBuddy `rawUsage.prompt_tokens`：**同时含缓存读与缓存写**，实测 `prompt = 命中 + 未命中 + 写`
+  对 1432/1432 行成立 → 两项都要拆出去。只减命中会把写缓存重复算一次（国内 29 万 / 国外 34 万 tok）。
+  拆完三桶后 `净输入 + 输出 + 命中 + 写` 恰好等于应用自己记的 `total_tokens`（国内 179,934,868 /
+  国外 151,440,924）—— `verify.py` Y 段就钉这条等式，并用独立一遍 `os.walk` 解析做对照基线。
+  注意两版的"写缓存"字段名不一样：国内版是 `cache_creation_input_tokens`，国外版只有
+  `prompt_cache_write_tokens`。
 
 ### 守恒不变量（`verify.py` S/W 段逐范围硬断言）
 
@@ -110,7 +118,13 @@ hud-state.json      运行时用户偏好（已 gitignore，不入库）
 
 ### 双计保险
 
-每路带一个会话/请求 id 集合，与 CC Switch 的 `all_sids` 求交集；非空则**整路拒绝并入**并在面板写明。实测当前交集为 0（Qoder 243 个会话 vs CC Switch 1185 个）。
+每路带一个会话/请求 id 集合，与 CC Switch 的 `all_sids` 求交集；非空则**整路拒绝并入**并在面板写明。实测当前交集为 0（Qoder 243 个会话 vs CC Switch 1119 个；WorkBuddy 两版 29 个会话与 CC Switch、以及**两版彼此之间**也都是 0 交集）。
+
+### credits 与成本：只有部分源给得出
+
+- **成本(美元)**：只有 CC Switch 代理行与 cc-haha 有。其余各路本机都不记钱 → 记 0，面板说明行写明"本机不记钱"。
+- **credits**：Qoder 系与 **WorkBuddy 国内版**给得出（后者逐调用 `credit`，实测覆盖 96.2%、合计 678.64 分，与 `workbuddy.db::session_usage.credit_json` 同源）。
+- **WorkBuddy 国外版故意不并 credits**：1182 条里只有 20 条带值（合计 647.55，均值 32.4/次），而它自己的 `workbuddy.db` 只记到 103.68 —— 两本账差 5 倍，说明这一版本机没有可信积分基线。Y 段用断言把"HUD 并进去的必须是 0"钉死，同时打印出原始 647.55 证明这个 0 是**有意不并**而不是漏读。
 
 ## 🔒 硬约束（改代码前必读）
 
@@ -141,8 +155,9 @@ hud-state.json      运行时用户偏好（已 gitignore，不入库）
 | T | 电源真实参数（假 subprocess 调真函数）、定时跨重启续用、**坏状态文件不许让程序起不来**、托盘事件合并、位图引用存活、文案与取数对齐 |
 | U | Qoder 路：解析可复现、会话不相交、"token 恒 0"哨兵、缺目录不崩 |
 | V | ZCode / 牧羊人 / Codex 漏项 / Qoder CN 的口径与双计 |
-| W | 今日档小时条形：六路逐小时守恒、画法切换、悬停、无残留图元 |
+| W | 今日档小时条形：八路逐小时守恒、画法切换、悬停、无残留图元 |
 | X | 跟随启停：启动文件夹解析、判定真值表 8 组、退出标记联动 |
+| Y | WorkBuddy 两版：独立 `os.walk` 基线对账、**缓存拆桶不多不少**（净输入+命中+写 == Σprompt、四桶 == 应用自记 `total_tokens`）、每路四视图齐并、积分只认国内版（国外版硬断言并 0）、人造相交整路拒绝、缺目录降级、横幅 8 个槽位无空值 |
 
 ## 🐞 已知未决（审计起点）
 
@@ -150,9 +165,12 @@ hud-state.json      运行时用户偏好（已 gitignore，不入库）
 2. **Codex「同一会话内部回填不全」只报不并**：某会话 rollout 有 94 次响应、CC Switch 只回填 13 行。CC 的 `request_id` 尾号（261..273）不是 rollout 行号（1286,1293…），拿不到逐请求对应关系，所以宁少不双计。
 3. **`follow-probe.pyw` 的"HUD 是否已在跑"查询不可靠**：`CreateMutexW` 判存在有副作用（自己把互斥体建出来），改成 `OpenMutexW` 后实测仍查不到。目前靠 HUD 自身 `__main__` 的互斥体闸门兜底（多拉起的实例会自杀），已实测最终只剩一个进程。
 4. **多显示器下 `_work_area()` 仍按主屏算**（`SPI_GETWORKAREA` 只回主屏），拖到副屏后可能被拽回。本机单屏，未实测。
-5. **`fetch_haha` / `fetch_zcode` / `fetch_herdsman` 把"库损坏"吞成"这一路缺席"**（`except Exception: return None`），静默少计与"没装这个软件"在界面上无法区分。
+5. **`fetch_haha` / `fetch_zcode` / `fetch_herdsman` / `fetch_workbuddy` 把"库损坏"吞成"这一路缺席"**（`except Exception: return None` 或整文件跳过），静默少计与"没装这个软件"在界面上无法区分。
 6. **每次刷新在后台线程整份重读活动 transcript**：缓存键是 `(size, mtime)`，追加即 miss；成本随当日用量线性增长且无上限。已移到后台线程（不冻 UI），但没做增量读。
 7. `verify.py` 的 K 段（菜单几何）**偶发** `bad window path name`：真游标/点击会触发 `Pop._watch` 的"点外面就关"。判为环境抖动，重跑即过；不要为此改产品代码。
+8. **WorkBuddy 数据目录写死为 `~\.workbuddy` / `~\.workbuddy-ai`**：这两个名字来自各自安装目录 `resources/app.asar.unpacked/cli/product.json` 的 `dataFolderName`（实测国内版 endpoint=workbuddy.cn / 国外版 =workbuddy.ai）。厂商改名或用户搬走配置目录时，这一路会**静默缺席**——cc-haha 那一路做了多盘自动发现，WorkBuddy 没有。
+9. **WorkBuddy 只读 jsonl，不读它的 `workbuddy.db`**：逐调用账只在 `projects/**/*.jsonl`；`workbuddy.db::session_usage` 只有会话级 `used/size/credit_json`。实测两版"最新 jsonl 的 mtime == `session_usage` 最大 `updated_at`"（国内 09-19 15:17 / 国外 10-14 16:56），所以 jsonl 不是被 sqlite 取代的旧账，只是用户真的停了。若哪天某版只写 db 不写 jsonl，本路会停在最后一天而不报错。
+10. **WorkBuddy 的缓存命中率极高（国内 98.46% / 国外 97.31%），会拉动全局命中率**：并入后 7 天档命中率 97.00%、全部档 86.40%。这不是 bug（各源如实报它自己的四项），但读数时要知道它已经不只是 CC Switch 那一路的命中率了。
 
 ## 📄 许可证
 

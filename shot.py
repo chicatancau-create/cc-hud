@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""三条版式的实拍取证(一次跑完): 收起 / 展开竖版 / 展开宽版, 外加一张关掉镂空的对照。
+"""三条版式的实拍取证(一次跑完): 收起 / 展开竖版 / 展开宽版, 外加一张关掉镂空的对照、
+一张"全部"档宽版(用来拍到只在早期记过账的那几路)、一张今日档小时条形。
 用 7 天范围拍 —— 今日只有 1 个点, 趋势卡画不出曲线, 拍出来看不出曲线有没有画坏。
 
 取证走 PrintWindow 而不是桌面 BitBlt(PIL 的 ImageGrab):
@@ -88,6 +89,17 @@ def cap():
     h.refresh()
     h.root.update()
     grab('shot-wide.png')
+    # 再拍一张"全部"档: WorkBuddy 国内版最后一笔账在 09-19, 7 天档里它是空的,
+    # 用 7 天档那张图证明不了"两版横幅真的画出了值"(国外版 09-17~10-14 才落在 7 天内)。
+    h.range_i = len(m.RANGES) - 1
+    h.refresh()
+    h.root.update()
+    grab('shot-wide-all.png')
+    # 今日档(只有 1 天 -> 画 24 根小时条形)也一起拍, 否则这张图会停在旧配色那一版
+    h.range_i = 0
+    h.refresh()
+    h.root.update()
+    grab('shot-today-bars.png')
     h.root.destroy()
     restore()
 

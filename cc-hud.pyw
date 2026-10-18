@@ -2,7 +2,7 @@
 r"""CC Switch 悬浮统计 HUD · 只读两份库 (mode=ro): %USERPROFILE%\.cc-switch\cc-switch.db
  与 cc-haha 的会话索引库(路径自动发现, 见 haha_db)。
 
-口径(两路数据源合并后的总量, 单看 CC Switch 那一路仍与它界面逐位对账过):
+口径(八路数据源合并后的总量, 单看 CC Switch 那一路仍与它界面逐位对账过):
   新增输入 = sum(input_tokens) - sum(cache_read_tokens where data_source='codex_session')
              ^ codex 回填行的 input_tokens 本身已含缓存读, 不减就是重复计(全库 20.0亿 vs 净 14.1亿)
   真实消耗 = 新增输入 + 输出 + 缓存创建 + 缓存命中
@@ -12,6 +12,14 @@ r"""CC Switch 悬浮统计 HUD · 只读两份库 (mode=ro): %USERPROFILE%\.cc-s
   出现「总请求 272 而应用行相加 34」这种各说各话, verify S 段按四个范围逐项钉住。
   能并的前提是两个源的会话 id 不相交(双计保险在 merge_haha, R 段断言)。
   只有**状态码与延迟**仍是 CC Switch 口径 —— cc-haha 的 transcript 里没有这两维, 面板上写明了。
+  第三路起都是"不走代理的客户端各自的本地账": Qoder / Qoder CN(只有响应数与 credits, token
+  四项本机恒为 0)、ZCode、牧羊人、Codex 未被 CC Switch 回填的会话, 以及第七八路 **WorkBuddy
+  国内版与国外版**(各自 `~/.workbuddy*/projects/**/*.jsonl` 的逐调用账)。
+  WorkBuddy 这一路的坑比 cc-haha 还深一层: `prompt_tokens` 同时含**缓存读与缓存写**, 实测
+  `prompt = 命中 + 未命中 + 写` 对 1432/1432 行成立 —— 只减命中会把写缓存(国内 29 万 / 国外 34 万)
+  重复算一次。拆完三桶后四桶相加恰好等于应用自己记的 `total_tokens`, verify Y 段按这条对账。
+  它只记官方积分不记美元, 所以成本记 0; 而积分**只有国内版给得出**(逐调用覆盖 96.2%),
+  国外版 1182 条里只有 20 条带值、且与它自己的 workbuddy.db 差 5 倍 -> 国外版一个积分都不并。
 计时只存在于 data_source='proxy' 的行(代理转发实测), 会话日志回填的行和 cc-haha 那一路都没有计时。
 只读取用量与配置字段, 绝不读取 providers.settings_config / universal_providers / cc-haha 的
 providers.json —— 那三处存明文 API key。两份库一律 mode=ro。
@@ -55,12 +63,22 @@ ZCODE_DB = os.path.join(os.path.expanduser('~'), '.zcode', 'cli', 'db', 'db.sqli
 HERD_LOG = os.path.join(os.path.expanduser('~'), '.herdsman', 'model_stats', 'events.jsonl')
 CODEX_DIRS = [os.path.join(os.path.expanduser('~'), '.codex', 'sessions'),
               os.path.join(os.path.expanduser('~'), '.codex', 'archived_sessions')]
+# WorkBuddy 两个版本的会话账(第七、八路)。目录名不是猜的 —— 来自各自安装目录 resources/app.asar.unpacked/
+# cli/product.json 的 dataFolderName: 国内版 WorkBuddy.exe(5.8.2) -> `.workbuddy`,
+# 国外版 WorkBuddyAI.exe(5.7.6) -> `.workbuddy-ai`(endpoint 也分别是 workbuddy.cn / workbuddy.ai)。
+# 第三个对得上的信号: 各自 ~/.workbuddy*/last-launch.json 里的 version+build == product.json 的
+# FileVersion+commit。最后一位 with_credit 是**国外版给不了成本基线**的开关, 见 fetch_workbuddy。
+WB_SOURCES = [(os.path.join(os.path.expanduser('~'), '.workbuddy', 'projects'),
+               'workbuddy', True),
+              (os.path.join(os.path.expanduser('~'), '.workbuddy-ai', 'projects'),
+               'workbuddy-ai', False)]
 # cc-haha(Claude Code 桌面壳)的索引库。它的配置目录**会被整机搬走**(实测: 先 C:\Users\Admin\.claude,
 # 10-08 之后搬到 E:\cc-haha), 写死任一路径都会静默读到一份不再更新的旧索引 —— 所以这里按候选位置
 # 逐个找、取 mtime 最新的那个。找法与 cc-haha 自己的扫描根一致: <配置目录>\cc-haha\db\index-v1.sqlite。
 HDB_SUB = os.path.join('cc-haha', 'db', 'index-v1.sqlite')
 _QODER_FILES = {}         # Qoder 会话 jsonl 的按文件解析缓存(同 _HAHA_FILES 一套做法)
 _HAHA_FILES = {}          # transcript -> ((size, mtime_ns, file_id), {message id: ...})
+_WB_FILES = {}            # WorkBuddy 会话 jsonl -> ((size, mtime_ns), 逐调用账)
 
 
 def _fixed_drives():
@@ -246,12 +264,22 @@ WIDE_W = 1560                                  # 宽版总宽: 1560 逻辑px = 1
 CHIP_BLOCK_W = 380                             # 范围胶囊那一块的最大宽度(宽版下不跟着拉长)
 PAD = 13
 PEEK = 34                                      # 隐藏后留在角落的呼出圆点直径
+# 卡片内纵向基线(逻辑px, 相对卡片顶) —— 全卡统一, 保证宽版同一排的四张卡横向严格对齐。
+# 此前是各卡各写: c2 用 47/63、c3 用 46/61、c4 用 45/61、haha/qoder 用 47/63、表格列头 47、
+# 代理与配置 46 —— 同排相差 1~2 逻辑px(125% 下 1.25~2.5 物理px), 看上去就是"没对齐"。
+CARD_LBL_DY = 46                               # 指标名 / 表格列头
+CARD_VAL_DY = 61                               # 指标值 / 表格首行
 # 下面每一档都是从用户参考图实测出来的占比最高色, 不是眼睛估的:
 #   页面底 #0b0e14(21%) 卡片 #10131d(27%) 卡片亮档 #171a24 描边 #22262e~#2a2d36
 #   轨道 #1c1f2a 琥珀 #fbbf24 靛底 #1d2040 青底 #122937 绿底 #102a2b
 BG, CARD, CARD2 = '#0b0e14', '#10131d', '#171a24'
 EDGE, TRACK = '#262b36', '#1c1f2a'
-FG, DIM, FAINT, MUTED = '#e8edf5', '#8a97a8', '#5c6878', '#454f63'
+# 次级文字四档的对比度按 WCAG 2.1 公式在卡片底 #10131d 上实算:
+#   FG #e8edf5 = 15.8:1   DIM #8a97a8 = 6.24:1   FAINT #7f8b9e = 5.38:1   MUTED #757f93 = 4.60:1
+# 旧值 FAINT #5c6878(3.27:1) / MUTED #454f63(2.25:1) 两档都低于 AA 的 4.5:1。而 MUTED 并不是
+# 装饰色 —— 它画的是**真实数据**(表格里的命中率/TOKEN 数值、趋势坐标刻度、四色图例文字、
+# 24小时时刻刻度), 3.27:1 在小号字下就是"发糊"。现在四档全部 ≥4.5:1, 层次与色相族不变。
+FG, DIM, FAINT, MUTED = '#e8edf5', '#8a97a8', '#7f8b9e', '#757f93'
 CY, GR, VI, AM, PK, TE, MA, IN = ('#38bdf8', '#34d399', '#a78bfa', '#fbbf24',
                                   '#f472b6', '#2dd4bf', '#c084fc', '#6366f1')
 # CC Switch 原版「使用统计」曲线配色(从其界面截图实测的色桶): 输入蓝/输出绿/创建橙/命中紫/成本红
@@ -265,6 +293,7 @@ APP_ALIAS = {'codex': 'Codex', 'claude': 'Claude Code', 'claude-desktop': 'Claud
              'gemini': 'Gemini CLI', 'grok': 'Grok Build', 'opencode': 'OpenCode',
              'openclaw': 'OpenClaw', 'hermes': 'Hermes', 'pi': 'Pi', 'minimax': 'MiniMax Code',
              'qoder': 'Qoder', 'qoder-cn': 'Qoder CN', 'zcode': 'ZCode',
+             'workbuddy': 'WorkBuddy 国内', 'workbuddy-ai': 'WorkBuddy 国外',
              'herdsman': '牧羊人(本地)'}        # 不走代理的直连客户端, 见 fetch_qoder/fetch_zcode
 
 
@@ -710,6 +739,35 @@ def _bake(im4, w, h, mat, hard=False):
 
 def _rgba(hx, a=255):
     return (int(hx[1:3], 16), int(hx[3:5], 16), int(hx[5:7], 16), a)
+
+
+_BAR = {}
+
+
+def _bar_img(w, h, col, mat):
+    """进度条位图: **左端圆角 + 右端直角**, 4x 超采样后压 mat 底。
+
+    为什么右端画直角: 条右端永远被 knob 盖住, 直角才不会在暗槽上戳出两个缺口;
+    若两端都画圆角, 条右端的圆角会在槽中间啃掉两块。
+    底材 mat 必须传"该处卡片的真实底色"(见 HUD._mat_at), 传死的 CARD 会露出一块平色矩形。
+    """
+    w = max(1, int(w))
+    h = max(1, int(h))
+    k = (w, h, col, mat)
+    img = _BAR.get(k)
+    if img is None:
+        from PIL import Image, ImageDraw
+        K = 4
+        im = Image.new('RGBA', (w * K, h * K), (0, 0, 0, 0))
+        r = h * K / 2.0
+        # 右边界多画 r 再靠 _bake 的缩回裁掉 -> 右端自然成直角
+        ImageDraw.Draw(im).rounded_rectangle([0, 0, w * K - 1 + r, h * K - 1], radius=r,
+                                             fill=_rgba(col, 255))
+        img = _bake(im, w, h, mat, hard=False)
+        if len(_BAR) > 128:                 # 上限保护: 命中率只在小数点后一位变, 键数很有限
+            _BAR.clear()
+        _BAR[k] = img
+    return img
 
 
 _GLY = {}
@@ -1767,6 +1825,149 @@ def fetch_codex_gap(start, have_sids):
     return z
 
 
+def _wb_ts(v):
+    """WorkBuddy 的 timestamp 实测是**毫秒字符串**("1789270258822"), 兼容数值型与秒。"""
+    try:
+        t = float(v)
+    except (TypeError, ValueError):
+        return None
+    return t / 1000.0 if t > 1e12 else t
+
+
+def _wb_rows(fp, psid):
+    """单个 WorkBuddy 会话文件 -> [(本地秒, 会话 id, 模型, 净输入, 输出, 缓存读, 缓存写, 积分)]。
+    按 (size, mtime_ns) 缓存: 国内版最大那个文件 7.3MB、两版合计 28MB, 这些 transcript 写完就不再
+    改, 不能每轮 CC_TICKS 重解析一遍。读到一半报错(OSError)时**不写缓存**, 下一轮还会重读。"""
+    try:
+        st = os.stat(fp)
+        sig = (st.st_size, st.st_mtime_ns)
+    except OSError:
+        return []
+    got = _WB_FILES.get(fp)
+    if got and got[0] == sig:
+        return got[1]
+    rows = []
+    ok = True
+    try:
+        with open(fp, encoding='utf-8', errors='replace') as fh:
+            for line in fh:
+                if '"rawUsage"' not in line:          # 绝大多数行是工具调用/快照, 先廉价跳过
+                    continue
+                line = line.strip()
+                if not line.startswith('{'):
+                    continue
+                try:
+                    o = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(o, dict):
+                    continue
+                pd = o.get('providerData')
+                ru = pd.get('rawUsage') if isinstance(pd, dict) else None
+                if not isinstance(ru, dict):
+                    continue
+                pr = int(ru.get('prompt_tokens') or 0)
+                ot = int(ru.get('completion_tokens') or 0)
+                if not (pr or ot):
+                    continue
+                ep = _wb_ts(o.get('timestamp'))
+                if ep is None:
+                    continue
+                ptd = ru.get('prompt_tokens_details')
+                ptd = ptd if isinstance(ptd, dict) else {}
+                rd = ru.get('prompt_cache_hit_tokens')
+                if rd is None:                        # 两条命名都见过: OpenAI 风格顶层 -> 嵌套兜底
+                    rd = ptd.get('cached_tokens') or 0
+                rd = int(rd or 0)
+                # 缓存写: 实测国内版走 cache_creation_input_tokens、国外版走 prompt_cache_write_tokens,
+                # 且两者同时出现时相等 -> 任一非零即为该行的写缓存量。
+                cw = int(ru.get('prompt_cache_write_tokens')
+                         or ru.get('cache_creation_input_tokens')
+                         or ptd.get('cached_creation_tokens') or 0)
+                cr = ru.get('credit')
+                rows.append((ep, str(o.get('sessionId') or psid),
+                             str(pd.get('model') or pd.get('requestModelId') or '(未记录)'),
+                             max(0, pr - rd - cw), ot, rd, cw,
+                             float(cr) if isinstance(cr, (int, float)) and cr > 0 else 0.0))
+    except OSError:
+        ok = False
+    if ok:
+        _WB_FILES[fp] = (sig, rows)
+    return rows
+
+
+def fetch_workbuddy(start, projects, key, with_credit):
+    """WorkBuddy 桌面版(国内/国外各一路)的逐请求真账:
+    `<数据目录>/projects/**/*.jsonl` 里每条带 `providerData.rawUsage` 的记录 = 一次模型调用。
+    实测 2026-10-18: 国内 1432 条 / 国外 1182 条, 每条记录 id 唯一 -> 本路内部不重复。
+    国外版有 3 个 `subagents/agent-*.jsonl`, 路径上归父会话, 但里面记的是子 agent 自己的
+    sessionId(实测与父会话不同), 所以两种 id 都进 sids —— 只会让双计保险更严, 不会漏。
+
+    口径: **`prompt_tokens` 同时含缓存读与缓存写** —— 实测 1432/1432 行满足
+    `prompt = prompt_cache_hit + prompt_cache_miss + 写缓存`, 所以净输入要把两项都拆出去
+    (只减命中会把写缓存重复算一次: 国内 290,867 / 国外 337,552)。拆完四桶相加恰好等于
+    应用自己记的 `total_tokens`(国内 179,934,868 / 国外 151,440,924) —— 这是 Y 段的对账不变式。
+    命中率 = 命中/prompt, 实测国内 98.46% / 国外 97.31%; 不拆的话并入量会从 855 万虚报成 3.31 亿。
+    与 ZCode/codex 回填同一类坑, 但这一路的写缓存字段名两版还不一样(见 _wb_rows)。
+
+    成本: 这一路拿不到美元成本(它只记官方积分), 与 ZCode 一样成本记 0。
+    credits: 只有国内版逐调用记得全(实测覆盖 96.2%, Σ678.64)。国外版 1182 条里只有 20 条带值
+    (Σ647.55, 均值 32.4/次), 而且与它自己的 `workbuddy.db::session_usage.credit_json`(Σ103.68)
+    差 5 倍 —— 两本账对不上就是没有基线, 所以 with_credit=False 时一个积分都不并。
+    """
+    if not os.path.isdir(projects):
+        return None
+    d0 = time.strftime('%Y-%m-%d', time.localtime(start)) if start else '0000-01-01'
+    by_day, sids, models = {}, set(), {}
+    hourly = [0] * 24
+    htok = new_hourly()
+    h1 = 0
+    last = 0.0
+    now = time.time()
+    for dp, _, fs in os.walk(projects):
+        for fn in fs:
+            if not fn.endswith('.jsonl'):
+                continue
+            fp = os.path.join(dp, fn)
+            rel = os.path.relpath(fp, projects).split(os.sep)
+            if len(rel) < 2:
+                continue
+            psid = rel[1][:-6] if rel[1].endswith('.jsonl') else rel[1]
+            sids.add(psid)
+            for ep, sid, mdl, fi, ot, rd, cw, cr in _wb_rows(fp, psid):
+                sids.add(sid)
+                if ep > last:
+                    last = ep
+                dte = dt.date.fromtimestamp(ep).isoformat()
+                if dte < d0:
+                    continue
+                d = by_day.setdefault(dte, _newday())
+                d['reqs'] += 1
+                d['in'] += fi
+                d['out'] += ot
+                d['rd'] += rd
+                d['cc'] += cw
+                if with_credit:
+                    d['credits'] += cr
+                hh = time.localtime(ep).tm_hour
+                d['hours'][hh] += 1
+                hourly[hh] += 1
+                if ep >= now - 3600:
+                    d['h1'] += 1
+                    h1 += 1
+                m = models.setdefault(mdl, [0, 0])
+                m[0] += 1
+                m[1] += fi + ot + rd + cw
+                add_hour(htok, hh, fi, ot, rd, cw, 1)
+    if not by_day:
+        return None
+    z = _src(key, APP_ALIAS.get(key, key), key, by_day, sids, hourly, h1, int(last),
+             models, 'prompt 含缓存读与写(两项均已拆出) · 本机不记钱'
+             + ('' if with_credit else ' · 国外版积分两本账互相矛盾, credits 不并'))
+    z['htok'] = htok
+    return z
+
+
 def merge_qoder(d, qb):
     """把 Qoder 的量并进**它给得出的那些维度**: 总请求数 / 按天请求 / 24小时 / 今日·昨日·近1小时
     / 应用表, 外加一个新的 credits 维度。token、成本、命中率一个都不碰(它本机没有)。
@@ -2293,6 +2494,8 @@ class HUD:
         self.imgs = {}
         self.pair = {}
         self.barh = {}
+        self.barfill = {}
+        self.barmat = {}
         self.zones = []
         self._missing = set()
         try:                                 # 状态文件里一个坏 pmin 会让 HUD 启动即崩
@@ -2917,7 +3120,12 @@ class HUD:
             merge_extra(d, qcn)
         for f in (lambda: fetch_zcode(start),
                   lambda: fetch_herdsman(start),
-                  lambda: fetch_codex_gap(start, d.get('codex_sids') or set())):
+                  lambda: fetch_codex_gap(start, d.get('codex_sids') or set()),
+                  # 第七、八路: WorkBuddy 国内版与国外版各自一本账
+                  lambda: fetch_workbuddy(start, WB_SOURCES[0][0], WB_SOURCES[0][1],
+                                          WB_SOURCES[0][2]),
+                  lambda: fetch_workbuddy(start, WB_SOURCES[1][0], WB_SOURCES[1][1],
+                                          WB_SOURCES[1][2])):
             try:
                 merge_extra(d, f() or {})
             except Exception as e:
@@ -3033,8 +3241,26 @@ class HUD:
         self.imgs[key] = img
         return i
 
+    def _mat_at(self, y):
+        """卡片内某个高度处的**真实底色** —— 与 _panel_img 的渐变(含强调色辉光)同源。
+
+        精灵烘图时必须拿它当底材。原因: `_bake` 会把整张精灵矩形填成**不透明的 mat 色**,
+        而卡面是"上深下亮"的渐变 —— 传死的 CARD, 就会在卡片下半部露出一块平色矩形,
+        看上去像"一块灰影"。用户 2026-10-14 放大截图点名了「展开大面板」胶囊背后那块
+        (该处卡面实测 (21,31,44), 而 CARD 只有 (16,19,29))。
+        """
+        cy, ch, acc = getattr(self, '_cur_card', (0.0, 0.0, ''))
+        t = 0.0 if ch <= 1 else min(1.0, max(0.0, (y - cy) / float(ch - 1)))
+        base = _mix(CARD, _mix(CARD, '#33405a', .55), .26 * t)      # 与 _panel_img 同一条渐变
+        if acc:
+            v = t * 255.0
+            a = max(0.0, v * 3.2 - 255 * 2.2) * .055 / 255.0        # 与 _panel_img 同一道辉光
+            if a > 0:
+                base = _mix(base, acc, a)
+        return base
+
     def _rr(self, key, x, y, w, h, r, fill, outline=''):
-        img = self._sprite(w, h, r, fill, outline)
+        img = self._sprite(w, h, r, fill, outline, self._mat_at(y + h / 2.0))
         i = self.cv.create_image(int(round(x + w / 2.0)), int(round(y + h / 2.0)),
                                  image=img, tags='fg')
         if key:
@@ -3042,8 +3268,14 @@ class HUD:
             self.imgs[key] = img                    # 断引用 Tk 会回收图片, 必须自己持有
         return i
 
-    def _rr2(self, key, x, y, w, h, r, off, on, mat=CARD, hard=False):
-        """两态圆角壳(选中/未选中): 两张图预先烘好, 刷新只换图不新建图元。"""
+    def _rr2(self, key, x, y, w, h, r, off, on, mat=None, hard=False):
+        """两态圆角壳(选中/未选中): 两张图预先烘好, 刷新只换图不新建图元。
+
+        mat=None(默认) = 自动取该处卡片的真实底色; 直接画在镂空带上的必须显式传
+        mat=BG + hard=True, 否则抗锯齿那一圈会被拍平成 CARD 深色, 看着像一圈投影。
+        """
+        if mat is None:
+            mat = self._mat_at(y + h / 2.0)
         a = self._sprite(w, h, r, off[0], off[1], mat, hard)
         b = self._sprite(w, h, r, on[0], on[1], mat, hard)
         i = self.cv.create_image(int(round(x + w / 2.0)), int(round(y + h / 2.0)),
@@ -3095,26 +3327,34 @@ class HUD:
             self._put(key, fill=fill)
 
     def _bar(self, key, x, y, w, h, fill=None):
-        """圆角进度条 = 中间矩形 + 两端圆头。oval 自带抗锯齿, 所以条也是圆的且不露齿。"""
-        it = self.ids.get(key)
-        if it is None:
-            r = h / 2.0
-            it = (self.cv.create_rectangle(0, 0, 0, 0, fill=fill, outline='', tags='fg'),
-                  self.cv.create_oval(0, 0, 0, 0, fill=fill, outline='', tags='fg'),
-                  self.cv.create_oval(0, 0, 0, 0, fill=fill, outline='', tags='fg'))
-            self.ids[key] = it
-            self.barh[key] = h
-        rect, ol, orr = it
-        h = self.barh[key]
-        r = min(h / 2.0, max(0.0, w) / 2.0)
-        x, y = int(round(x)), int(round(y))
-        self.cv.coords(rect, x + r, y, x + w - r, y + h)
-        self.cv.coords(ol, x, y, x + 2 * r, y + h)
-        self.cv.coords(orr, x + w - 2 * r, y, x + w, y + h)
+        """圆角进度条 —— 4x 超采样位图, 与曲线/卡片同一套做法。
+
+        以前是 Tk 的 rectangle + 两端 oval 拼的: **oval 不做抗锯齿**, 填充条左端圆头是
+        一排锯齿台阶(用户 2026-10-14 放大截图点名)。现在整条交给 PIL:
+          · 左端圆角与暗槽同半径 -> 边界平滑;
+          · 右端直角 -> 被 knob 盖住, 不会在槽上戳缺口;
+          · 底材 = 该处卡片的真实底色 -> 条外与卡面严丝合缝。
+        """
+        h = max(1, int(round(h)))
+        w = max(0, int(round(w)))
         if fill is not None:
-            for i in it:
-                if self.cv.itemcget(i, 'fill') != fill:
-                    self.cv.itemconfig(i, fill=fill)
+            self.barfill[key] = fill
+        col = self.barfill.get(key, GR)
+        self.barh[key] = h
+        # 底材只在**布局期**算一次并缓存: paint 里每次刷新都会调 _bar, 那时 _cur_card 已经
+        # 是最后建的那张卡了, 现算会取错底色。
+        mat = self.barmat.get(key)
+        if mat is None:
+            mat = self.barmat[key] = self._mat_at(y + h / 2.0)
+        img = _bar_img(w, h, col, mat)
+        i = self.ids.get(key)
+        if i is None:
+            i = self.cv.create_image(0, 0, image=img, tags='fg')
+            self.ids[key] = i
+        elif self.imgs.get(key) is not img:
+            self.cv.itemconfig(i, image=img)
+        self.imgs[key] = img                 # 断引用 Tk 会回收图片, 必须自己持有
+        self.cv.coords(i, int(round(x + w / 2.0)), int(round(y + h / 2.0)))
 
     def _cardw(self, key):
         """某张卡的内容宽; 收起态/竖版没登记时退回当前 self.cw(那时它就是整宽卡, 正确)。"""
@@ -3150,6 +3390,8 @@ class HUD:
               x=None, w=None):
         """x/w 不传 = 整宽(竖版)。宽版按列摆放时传进来, 卡内一切坐标都跟着 self.cx/cw 走。"""
         s = self.s
+        # 登记"当前卡片"的几何与强调色: 卡内精灵烘图时要按这个算真实底色(见 _mat_at)
+        self._cur_card = (float(y), float(h), color)
         if x is None:
             x = int(round(PAD * s))
         if w is None:
@@ -3197,7 +3439,7 @@ class HUD:
         x0 = int(round(PAD * s))
         fn = {'c1': self._c1, 'c2': self._c2, 'c3': self._c3, 'c4': self._c4, 'c6': self._c6,
               'c7': self._c7, 'c8': self._c8, 'prov': self._prov, 'model': self._model,
-              'haha': self._haha, 'qoder': self._qoder}
+              'haha': self._haha, 'qoder': self._qoder, 'wb': self._wb}
         self._gap = 0                             # 纵向推进由本函数负责, 卡片不再各自加间隙
         y = fn['c6'](y, x0, pw) + Gt              # 趋势图: 全宽一整行
         n = len(self.ROWS[0])
@@ -3207,8 +3449,9 @@ class HUD:
             for i, k in enumerate(row):
                 fn[k](y, x0 + i * (colw + G), colw, minh)
             y += minh + G
-        y = fn['haha'](y, x0, pw) + G             # 倒数第二行: 全宽横幅(cc-haha 直连会话)
-        y = fn['qoder'](y, x0, pw) + G            # 最后一行: 全宽横幅(Qoder, 不走代理)
+        y = fn['haha'](y, x0, pw) + G             # 倒数第三行: 全宽横幅(cc-haha 直连会话)
+        y = fn['qoder'](y, x0, pw) + G            # 倒数第二行: 全宽横幅(Qoder, 不走代理)
+        y = fn['wb'](y, x0, pw) + G               # 最后一行: 全宽横幅(WorkBuddy 国内+国外)
         return y
 
     def _c1(self, y, x=None, w=None, minh=None):
@@ -3246,8 +3489,8 @@ class HUD:
         for i, (k, lab, c) in enumerate((('a', '总请求数', FG), ('b', '总成本', VI),
                                          ('c', '今日', TE), ('d', '近1小时', AM))):
             xx = self.cx + int(self.cw / 4 * i)
-            self._t('c2.%sl' % k, xx, y + int(round(47 * s)), lab, FAINT, self.f_micro)
-            self._t('c2.%s' % k, xx, y + int(round(63 * s)), '', c, self.f_num)
+            self._t('c2.%sl' % k, xx, y + int(round(CARD_LBL_DY * s)), lab, FAINT, self.f_micro)
+            self._t('c2.%s' % k, xx, y + int(round(CARD_VAL_DY * s)), '', c, self.f_num)
         return yb + self._gap
 
     def _layout(self):
@@ -3264,6 +3507,8 @@ class HUD:
         self.imgs.clear()
         self.pair.clear()
         self.barh.clear()
+        self.barfill = {}             # 进度条当前颜色(按槽位记), 换色才重建位图
+        self.barmat = {}              # 进度条底材(布局期按所在卡片算一次)
         self.zones.clear()
         px, pw = int(round(PAD * s)), W - 2 * int(round(PAD * s))
         y = int(round(12 * s))
@@ -3272,6 +3517,8 @@ class HUD:
         self._head_h = 62 if self.expanded else 224
         self._panel('head.bg', px, y, pw, int(round(self._head_h * s)),
                     int(round(11 * s)), accent=CY)
+        # 头卡也是一个"卡片": 卡内精灵(logo/范围胶囊/进度槽/底栏胶囊)按它的渐变算真实底色
+        self._cur_card = (float(y), float(int(round(self._head_h * s))), CY)
         hy = y + int(round(9 * s))
 
         self._rr('logo', px + int(round(11 * s)), hy, int(round(20 * s)), int(round(20 * s)),
@@ -3384,7 +3631,7 @@ class HUD:
         self._rr2('foot.pbg', pbx, y + int(round(4 * s)), pbw, pbh, int(round(6 * s)),
                   (_mix(CARD, CY, .13), _mix(EDGE, CY, .5)),
                   (_mix(CARD, VI, .16), _mix(EDGE, VI, .55)),
-                  BG if self.expanded else CARD, self.expanded)
+                  BG if self.expanded else None, self.expanded)
         self._t('foot.r', pbx + pbw / 2.0, y + int(round(13 * s)), '展开大面板', CY, self.f_tiny,
                 'center')
         self._zone(pbx, y + int(round(4 * s)), pbw, pbh, self.toggle)
@@ -3419,8 +3666,8 @@ class HUD:
                                          ('out', '输出', TE), ('cre', '缓存创建', AM),
                                          ('rd', '缓存命中', GR))):
             xx = self.cx + int(tw * i)
-            self._t(k + '.l', xx, y + int(round(46 * s)), lab, FAINT, self.f_micro)
-            self._t(k + '.v', xx, y + int(round(61 * s)), '', c, self.f_num)
+            self._t(k + '.l', xx, y + int(round(CARD_LBL_DY * s)), lab, FAINT, self.f_micro)
+            self._t(k + '.v', xx, y + int(round(CARD_VAL_DY * s)), '', c, self.f_num)
         self._rr('c5.bg', self.cx, y + int(round(71 * s)), self.cw, int(round(7 * s)),
                  int(round(3.5 * s)), EDGE)
         self.cbar = (self.cx, y + int(round(71 * s)), self.cw, int(round(7 * s)))
@@ -3444,8 +3691,8 @@ class HUD:
         for i, (k, lab, c) in enumerate((('ftt', '首TOKEN', TE), ('sp', '生成TOK/S', CY),
                                          ('lat', '请求耗时', VI))):
             xx = self.cx + int(self.cw / 3 * i)
-            self._t(k + '.l', xx, y + int(round(45 * s)), lab, FAINT, self.f_micro)
-            self._t(k + '.v', xx, y + int(round(61 * s)), '—', c, self.f_num)
+            self._t(k + '.l', xx, y + int(round(CARD_LBL_DY * s)), lab, FAINT, self.f_micro)
+            self._t(k + '.v', xx, y + int(round(CARD_VAL_DY * s)), '—', c, self.f_num)
         self._t('c4.note', self.cx, y + int(round(77 * s)), '', MUTED, self.f_tiny)
         return yb + self._gap
 
@@ -3535,10 +3782,10 @@ class HUD:
         y += (H - hh) // 2
         for j, (letter, head, ax, col, small) in enumerate(cols):
             self._t('%s.hd%s' % (key, letter), self.cx + int(self.cw * ax),
-                    y + int(round(47 * s)), head, FAINT, self.f_tiny, 'w' if ax == 0 else 'e')
+                    y + int(round(CARD_LBL_DY * s)), head, FAINT, self.f_tiny, 'w' if ax == 0 else 'e')
             for i in range(nrow):
                 self._t('%s.%s%d' % (key, letter, i), self.cx + int(self.cw * ax),
-                        y + int(round(62 * s)) + int(round(12 * s)) * i, '', col,
+                        y + int(round(CARD_VAL_DY * s)) + int(round(12 * s)) * i, '', col,
                         self.f_tiny if small else self.f_sm, 'w' if ax == 0 else 'e')
         return yb
 
@@ -3568,7 +3815,7 @@ class HUD:
         yb = y + H
         y += (H - hh) // 2
         for i in range(n):
-            self._t('c8.l%d' % i, self.cx, y + int(round(46 * s)) + int(round(12 * s)) * i, '',
+            self._t('c8.l%d' % i, self.cx, y + int(round(CARD_LBL_DY * s)) + int(round(12 * s)) * i, '',
                     FAINT, self.f_tiny)
         return yb + self._gap
 
@@ -3590,8 +3837,8 @@ class HUD:
                                          ('sess', '会话', FG), ('msgs', '消息', TE),
                                          ('calls', '工具调用', VI), ('days', '活跃天数', AM))):
             xx = self.cx + int(self.cw / 6 * i)
-            self._t('haha.%sl' % k, xx, y + int(round(47 * s)), lab, FAINT, self.f_micro)
-            self._t('haha.%s' % k, xx, y + int(round(63 * s)), '', c, self.f_num)
+            self._t('haha.%sl' % k, xx, y + int(round(CARD_LBL_DY * s)), lab, FAINT, self.f_micro)
+            self._t('haha.%s' % k, xx, y + int(round(CARD_VAL_DY * s)), '', c, self.f_num)
         return yb + self._gap
 
     def _qoder(self, y, x=None, w=None, minh=None):
@@ -3609,8 +3856,31 @@ class HUD:
                                          ('sess', '会话', FG), ('days', '活跃天数', TE),
                                          ('streak', '连续', CY), ('avg', '平均 credits/请求', FAINT))):
             xx = self.cx + int(self.cw / 6 * i)
-            self._t('qoder.%sl' % k, xx, y + int(round(47 * s)), lab, FAINT, self.f_micro)
-            self._t('qoder.%s' % k, xx, y + int(round(63 * s)), '', c, self.f_num)
+            self._t('qoder.%sl' % k, xx, y + int(round(CARD_LBL_DY * s)), lab, FAINT, self.f_micro)
+            self._t('qoder.%s' % k, xx, y + int(round(CARD_VAL_DY * s)), '', c, self.f_num)
+        return yb + self._gap
+
+    def _wb(self, y, x=None, w=None, minh=None):
+        """WorkBuddy 两版横幅 —— 宽版最后一行。
+        「并入积分」这一格**只有国内版给得起**(逐调用覆盖 96.2%), 国外版 1182 条里只有 20 条带值、
+        且与它自己的 workbuddy.db 差 5 倍, 所以不给它一个看起来像真值的格子, 只在说明行写清"不并"。
+        竖版不画(同 _haha/_qoder: 展开态已经贴着工作区底了)。"""
+        s = self.s
+        hh = int(round(84 * s))
+        H = max(hh, minh or 0)
+        self._card('wb', y, H, MA, 'grid', 'WorkBuddy(两版已并入)', vkey='wb.v',
+                   vcol=MA, vfont=self.f_tiny, x=x, w=w)
+        yb = y + H
+        y += (H - hh) // 2
+        for i, (k, lab, c) in enumerate((('cred', '并入积分(仅国内)', AM),
+                                         ('reqs', '并入请求数', MA),
+                                         ('tok', '并入真实消耗', FG),
+                                         ('sess', '会话', TE),
+                                         ('days', '有账天数', CY),
+                                         ('avg', '平均 积分/请求', FAINT))):
+            xx = self.cx + int(self.cw / 6 * i)
+            self._t('wb.%sl' % k, xx, y + int(round(CARD_LBL_DY * s)), lab, FAINT, self.f_micro)
+            self._t('wb.%s' % k, xx, y + int(round(CARD_VAL_DY * s)), '', c, self.f_num)
         return yb + self._gap
 
     def _hgt(self, key):
@@ -4037,6 +4307,39 @@ class HUD:
                     self._set('qoder.' + k, '—')
                 self._set('qoder.v', '没读到会话目录')
                 self._set('qoder.rt', '没找到 %s' % QDIR)
+
+        # WorkBuddy 两版: 并入器把每一路都留在 d['extra'][key] 里, 这里按 WB_SOURCES 的次序取
+        ex = d.get('extra') or {}
+        wbs = [ex[t[1]] for t in WB_SOURCES if ex.get(t[1])]
+        if self._widem:
+            live = [v for v in wbs if v.get('reqs')]
+            for k in ('cred', 'reqs', 'tok', 'sess', 'days', 'avg'):
+                self._set('wb.' + k, '—')
+            if live:
+                cn = next((v for v in live if v['key'] == 'workbuddy'), None)
+                self._set('wb.cred', '%.0f' % sum(v['credits'] for v in live))
+                self._set('wb.reqs', f"{sum(v['reqs'] for v in live):,}")
+                self._set('wb.tok', big(sum(v['in'] + v['out'] + v['rd'] + v['cc']
+                                            for v in live)))
+                self._set('wb.sess', f"{sum(v['sessions'] for v in live):,}")
+                self._set('wb.days', '%d天' % len({dte for v in live for dte in v['by_day']}))
+                self._set('wb.avg', '%.3f' % (cn['credits'] / cn['reqs'])
+                          if cn and cn['reqs'] else '—')
+                self._set('wb.v', self._fit(
+                    ' · '.join('%s %s 次' % (v['name'], f"{v['reqs']:,}") for v in live)
+                    + ' · 末次 %s' % stamp(max(v['last'] for v in live)),
+                    self.f_tiny, int(self._cardw('wb') * .42)))
+                self._set('wb.rt', self._fit(
+                    '两版都不走 CC Switch 代理 · prompt_tokens 含缓存读与写(已拆, 四桶相加=='
+                    '应用自记 total_tokens) · 国外版积分与它自己的 workbuddy.db 差 5 倍, 不并'
+                    ' · 会话 id 与 CC Switch 不相交(Y 段断言)', self.f_tiny, self._cardw('wb')))
+            elif wbs:
+                self._set('wb.v', '已拒绝并入')
+                self._set('wb.rt', '检测到 %d 个会话 id 已在 CC Switch 里 · 整路不并'
+                          % sum(v.get('clash', 0) for v in wbs))
+            else:
+                self._set('wb.v', '没读到会话目录')
+                self._set('wb.rt', '没找到 %s / %s' % (WB_SOURCES[0][0], WB_SOURCES[1][0]))
 
     def run(self):
         self._tick()                                 # 刷新与跟随判定共用这一条 after 链

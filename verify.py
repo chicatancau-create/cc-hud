@@ -946,6 +946,54 @@ def _roll_last_ts(path):
             last = max(last, ep)
     return last or time.time()
 
+def _wb_base(start, projects, with_credit):
+    """WorkBuddy 某一版的**独立**基线: 自己 os.walk 扫 jsonl, 不借道 fetch_workbuddy/_wb_rows。
+    返回 (请求数, 成本恒 0, tok=prompt+completion, 逐调用积分和, total_tokens 和, Σprompt, Σcompletion)。
+    tok 用 prompt+completion 而不是四桶相加, 是为了让"缓存少减/多减"这类错必须暴露
+    (HUD 那边拆成 净输入/命中/写 三桶, 两条路径只有在拆得不多不少时才相等)。"""
+    n = tk = tt = psum = osum = 0
+    cr = 0.0
+    d0 = time.strftime('%Y-%m-%d', time.localtime(start)) if start else '0000-01-01'
+    if not os.path.isdir(projects):
+        return 0, 0.0, 0, 0.0, 0, 0, 0
+    for dp, _, fs in os.walk(projects):
+        for fn in fs:
+            if not fn.endswith('.jsonl'):
+                continue
+            with open(os.path.join(dp, fn), encoding='utf-8', errors='replace') as fh:
+                for line in fh:
+                    if '"rawUsage"' not in line:
+                        continue
+                    try:
+                        o = json.loads(line)
+                    except ValueError:
+                        continue
+                    pd = o.get('providerData') if isinstance(o, dict) else None
+                    ru = pd.get('rawUsage') if isinstance(pd, dict) else None
+                    if not isinstance(ru, dict):
+                        continue
+                    pr = int(ru.get('prompt_tokens') or 0)
+                    ot = int(ru.get('completion_tokens') or 0)
+                    if not (pr or ot):
+                        continue
+                    try:
+                        ts = float(o.get('timestamp') or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    ep = ts / 1000.0 if ts > 1e12 else ts
+                    if not ep or dt.date.fromtimestamp(ep).isoformat() < d0:
+                        continue
+                    n += 1
+                    tk += pr + ot
+                    psum += pr
+                    osum += ot
+                    tt += int(ru.get('total_tokens') or 0)
+                    k = ru.get('credit')
+                    if with_credit and isinstance(k, (int, float)) and k > 0:
+                        cr += k
+    return n, 0.0, tk, cr, tt, psum, osum
+
+
 EXTRA_BASE = {                      # (app, 独立取数)
     'zcode': lambda: (lambda c: (lambda r: (r[0], 0.0, r[1]))(c.execute(
         "select count(*), coalesce(sum(input_tokens+output_tokens+reasoning_tokens"
@@ -956,6 +1004,11 @@ EXTRA_BASE = {                      # (app, 独立取数)
     'qoder-cn': lambda: (lambda q: (sum(v['reqs'] for v in q['by_day'].values()), 0.0, 0)
                          if q else (0, 0.0, 0))(m.fetch_qoder(st, m.QDIR_CN)),
     'codex': _codex_gap_base,
+    # WorkBuddy 两版: 各自独立扫一遍 jsonl。基线的 tok **直接取 prompt+completion**, 而 HUD 那边
+    # 是把 prompt 拆成 净输入/命中/写 三桶再与输出相加 —— 两条路径只有在拆桶不多不少时才相等,
+    # 所以这条对账同时管住了"缓存少减/多减"这一类错(实测少减写缓存会多算 29 万/34 万)。
+    'workbuddy': lambda: _wb_base(st, m.WB_SOURCES[0][0], True)[:3],
+    'workbuddy-ai': lambda: _wb_base(st, m.WB_SOURCES[1][0], False)[:3],
 }
 for app, fn in EXTRA_BASE.items():
     try:
@@ -1060,13 +1113,14 @@ for k, b in bb.items():
 flat = sorted(rows.items())
 print('  按排分组(权重从上往下): %s' % [(t, [k for k, _ in v]) for t, v in flat])
 same = all(len(set(b[3] for _, b in v)) == 1 for _, v in flat)
-banner = [v for _, v in flat if len(v) == 1 and v[0][0] in ('haha.bg', 'qoder.bg')]
-print('  每排内部底边齐平 %s · 排数 %d · 每排卡数 %s (期望 1 / 4 / [4, 4, 1, 1] —— 齐平才是矩形)'
+banner = [v for _, v in flat if len(v) == 1 and v[0][0] in ('haha.bg', 'qoder.bg', 'wb.bg')]
+print('  每排内部底边齐平 %s · 排数 %d · 每排卡数 %s (期望 1 / 5 / [4, 4, 1, 1, 1] —— 齐平才是矩形)'
       % (int(same), len(flat), [len(v) for _, v in flat]))
-print('  两条全宽横幅(cc-haha + Qoder) %s · 都占满内宽 %s (期望 2 / 1)'
+print('  三条全宽横幅(cc-haha + Qoder + WorkBuddy) %s · 都占满内宽 %s (期望 3 / 1)'
       % (len(banner), int(all((v[0][1][2] - v[0][1][0])
                               >= h.root.winfo_width() - 2 * int(round(m.PAD * h.s)) - 2
                               for v in banner))))
+assert len(banner) == 3, '横幅少于一三条时上面的 all() 会变成空集恒真'
 G = int(round(8 * h.s))
 Gt = int(round(2 * h.s))
 bands = [tr] + [[min(b[1] for _, b in v), min(b[1] for _, b in v),
@@ -1076,8 +1130,8 @@ vg = [bands[i + 1][1] - bands[i][3] for i in range(len(bands) - 1)]
 # 之前用 _H 算, 舍入会把 10 报成 8, 看着像间隙不统一。
 pb = h.cv.bbox(h.ids['foot.pbg'])
 vg.append(int(round(pb[1] - 4 * h.s)) - bands[-1][3])
-assert len(flat) == 4 and [len(v) for _, v in flat] == [4, 4, 1, 1], \
-    'P 段版面不是"两排 4 张 + 两条横幅", 后面的空集合 all() 会变成假通过'
+assert len(flat) == 5 and [len(v) for _, v in flat] == [4, 4, 1, 1, 1], \
+    'P 段版面不是"两排 4 张 + 三条横幅", 后面的空集合 all() 会变成假通过'
 print('  竖向间隙 %s · 曲线下面那格 %d(特别小) · 其余间隙全等于 %d(±1) (期望 1)'
       % (vg, Gt, G), int(all(abs(g - G) <= 1 for g in vg[1:-1])) and int(abs(vg[-1] - G) <= 1)
       and int(abs(vg[0] - Gt) <= 1))
@@ -1486,8 +1540,40 @@ assert '次/时' not in allt and '累计' in txts['c7.rt'], '24小时格仍写�
 assert txts['c6.peak'].startswith('最大一天'), '趋势图峰值标注仍与左轴同叫"峰值"'
 assert '计价来源' not in allt, '「计价来源 response」是无字段支撑的写死文案'
 assert '未选Provider' not in allt
-assert '实测' in txts['c4.rt'] and '首token' in txts['c4.rt'], '延迟卡三个分母仍不同'
 assert h.ids.get('c8.rt') is None or txts.get('c8.rt', '') != '', 'c8.rt 是注册了从不赋值的死槽位'
+
+# T6b 延迟卡分母文案。原来这一条绑死在某一档上, 而代理实测会随时间掉出窗口 ——
+# 2026-10-18 实测: proxy_request_logs 最大 created_at 是 10-11, 今日与 7 天档一条都没有,
+# 于是卡片合法地写"本范围无实测", 绑死的断言就假红。改成四档全跑, 每档该走哪个分支
+# 由**独立 SQL** 数出来的样本数决定(与 HUD 同一条件 latency_ms>0, 但不读它算出来的数),
+# 有实测的档必须写全分母、没实测的档必须落到空态文案, 两个分支都各有门禁。
+_db6 = sqlite3.connect('file:' + m.DB.replace(os.sep, '/') + '?mode=ro', uri=True)
+_have = _none = 0
+h.expanded = True                      # 延迟卡只在展开/宽版排版里才建槽位, 收起态没有
+for ri, (rname, rdays) in enumerate(m.RANGES):
+    s0 = 0 if not rdays else int(dt.datetime.combine(
+        dt.date.today() - dt.timedelta(days=rdays - 1), dt.time.min).timestamp())
+    n = _db6.execute('select count(*) from proxy_request_logs where ' +
+                     ('created_at>=? and latency_ms > 0' if s0 else 'latency_ms > 0'),
+                     () if not s0 else (s0,)).fetchone()[0]
+    h.range_i = ri
+    h.wide = True
+    h.refresh(True)
+    h.root.update()
+    assert h.ids.get('c4.rt'), '%s 档展开宽版后没有 c4.rt 槽位' % rname
+    rt = h.cv.itemcget(h.ids['c4.rt'], 'text')
+    if n:
+        _have += 1
+        assert '实测' in rt and '首token' in rt, \
+            '%s 档库里有 %d 条代理实测, 延迟卡却没写全三个分母: %r' % (rname, n, rt)
+    else:
+        _none += 1
+        assert '无实测' in rt and '首token' not in rt, \
+            '%s 档库里 0 条代理实测, 延迟卡却写了分母(会读成"有数"): %r' % (rname, rt)
+    print('  %-5s 档: 库里代理实测 %6d 条 -> c4.rt %r' % (rname, n, rt))
+_db6.close()
+assert _have, '四个范围里 CC Switch 一条代理实测都没有 —— 这段门禁成了空集(换机/清库?), 需人工确认'
+print('  两个分支都覆盖到: 有实测 %d 档 · 空态 %d 档 (期望都 >=1)' % (_have, _none))
 h.range_i = ORIG_STATE.get('range', 1)
 h.expanded = False
 h.wide = False
@@ -1628,10 +1714,10 @@ qc = ex['qoder-cn']
 assert qc['in'] == 0 and qc['out'] == 0 and qc['rd'] == 0 and qc['cc'] == 0
 print('  Qoder CN: 请求 %s · credits %.2f · token 四项 %s (期望 全 0)'
       % (qc['reqs'], qc['credits'], (qc['in'], qc['out'], qc['rd'], qc['cc'])))
-# V5 总量守恒仍然成立(六路一起)
+# V5 总量守恒仍然成立(八路一起)
 assert sum(a[1] for a in dv['apps']) == dv['reqs'] == sum(r[3] for r in dv['daily']) == sum(dv['hourly'])
 assert sum(r[2] for r in dv['daily']) == dv['real'] == dv['fresh_in'] + dv['out'] + dv['read'] + dv['creat']
-print('  六路合并后: 请求 %s (=Σ应用=Σ按天=Σ小时) · 净tok %s (=Σ按天=四项) · 成本 %.2f (=Σ应用)'
+print('  八路合并后: 请求 %s (=Σ应用=Σ按天=Σ小时) · 净tok %s (=Σ按天=四项) · 成本 %.2f (=Σ应用)'
       % (f"{dv['reqs']:,}", f"{int(dv['real']):,}", dv['cost']))
 # V6 面板上看得见, 且无定价这件事写明了
 h.refresh(True)
@@ -1664,7 +1750,7 @@ print('  三个源文件都不在: 红字 %d · 请求 %s -> 恢复后 %s (期�
 assert nf == 0 and d0v['reqs'] < dv['reqs']
 assert h._read(st)['reqs'] == dv['reqs'] or abs(h._read(st)['reqs'] - dv['reqs']) <= 5
 
-print('=== W. 今日档按小时条形图: 六路小时守恒 / 画法切换 / 悬停 / 无残留 ===')
+print('=== W. 今日档按小时条形图: 八路小时守恒 / 画法切换 / 悬停 / 无残留 ===')
 h.expanded = True
 h.wide = True
 h.range_i = 0                                        # 今日
@@ -1679,7 +1765,7 @@ sr = sum(b['reqs'] for b in ht)
 st = sum(b['in'] + b['out'] + b['rd'] + b['cc'] for b in ht)
 sc = sum(b['cost'] for b in ht)
 g = lambda k: h.cv.itemcget(h.ids[k], 'text') if k in h.ids else '<无槽位>'
-print('  六路逐小时: Σ请求 %s == 总请求 %s · Σ净tok %s == 真实消耗 %s · Σ成本 %.2f == 总成本 %.2f'
+print('  八路逐小时: Σ请求 %s == 总请求 %s · Σ净tok %s == 真实消耗 %s · Σ成本 %.2f == 总成本 %.2f'
       % (sr, d0w['reqs'], format(int(st), ','), format(int(d0w['real']), ','), sc, d0w['cost']))
 assert sr == d0w['reqs'], '有源的请求没落到小时桶 = 条形会少画'
 assert abs(st - d0w['real']) < 1, '逐小时 token 与真实消耗不等 = 柱高与顶部数字对不上'
@@ -1794,6 +1880,95 @@ src4 = open(r'G:\AIrenwu\cc-hud\cc-hud.pyw', encoding='utf-8').read()
 assert '暂不跟随退出' in src4 and src4.count('self.quit()') >= 2,     '跟随退出的两条分支(有定时不退 / 无定时退)被改掉了'
 print('  跟随退出分支在位: 定时未清不退 %s · 无定时跟着 quit %s (期望 真 / 真)'
       % (int('暂不跟随退出' in src4), int(src4.count('self.quit()') >= 2)))
+
+print('=== Y. 第七、八路 WorkBuddy(国内/国外): 拆桶不多不少 / 与独立基线对账 / 积分只认国内 / 双计保险 / 缺目录 ===')
+
+
+def _cp(b):
+    """浅拷贝一份可变的容器再并 —— merge_extra 会就地改 daily/apps/models/htok。"""
+    c = dict(b)
+    for k in ('daily', 'apps', 'models', 'hourly'):
+        c[k] = list(b[k])
+    c['htok'] = [dict(x) for x in b['htok']]
+    c['extra'] = dict(b.get('extra') or {})
+    c['model_names'] = set(b.get('model_names') or ())
+    c['app_parts'] = dict(b.get('app_parts') or {})
+    return c
+
+
+stY = h._start()
+allZ = {}
+for projects, key, cred in m.WB_SOURCES:
+    z = m.fetch_workbuddy(0, projects, key, cred)
+    allZ[key] = z
+    if not os.path.isdir(projects):
+        assert z is None, '目录不存在却返回了账'
+        print('  %-13s 目录不存在 -> 整路缺席(None), 不碰任何数' % key)
+        continue
+    n, _c0, tk, cr, tt, psum, osum = _wb_base(0, projects, cred)
+    bd = z['by_day']
+    four = z['in'] + z['out'] + z['rd'] + z['cc']
+    print('  %s: 独立数 %5d 次 / HUD %5d 次 · 净输入 %s + 命中 %s + 写 %s + 输出 %s'
+          % (key, n, z['reqs'], f"{z['in']:,}", f"{z['rd']:,}", f"{z['cc']:,}", f"{z['out']:,}"))
+    assert z['reqs'] == n, '请求数与独立基线不符'
+    # 拆桶不多不少: 净输入+命中+写 必须正好还原成应用自己记的 prompt_tokens
+    assert z['in'] + z['rd'] + z['cc'] == psum, \
+        '净输入+命中+写 != Σprompt(缓存少减/多减了): %s vs %s' % (f"{z['in']+z['rd']+z['cc']:,}", f'{psum:,}')
+    assert z['out'] == osum, '输出与独立基线不符'
+    assert four == tk == tt, '四桶相加 != prompt+completion != 应用自记 total_tokens'
+    # 每一路都要"并进所有视图", 只进一半是这个 HUD 历史上真发生过的 bug
+    assert sum(v['reqs'] for v in bd.values()) == n
+    assert sum(z['hourly']) == n == sum(sum(v['hours']) for v in bd.values())
+    htY = m.hourly_rows(z['htok'])
+    assert sum(r[3] for r in htY) == n and sum(r[2] for r in htY) == four, '逐小时与总量不守恒'
+    assert sum(v['in'] for v in bd.values()) == z['in'] and sum(v['rd'] for v in bd.values()) == z['rd']
+    # 积分: 国内版逐调用记得到 -> 与独立基线逐分对齐; 国外版两本账互相矛盾 -> 一个都不并
+    assert abs(z['credits'] - (cr if cred else 0.0)) < 1e-6, \
+        '%s 积分并错了: HUD %.2f vs 基线 %.2f(该版原始带值积分)' % (key, z['credits'], cr)
+    raw_ai = _wb_base(0, projects, True)[3]
+    print('    积分: HUD %.2f · 该版原始逐调用 Σ%.2f · 会话 %d · 有账 %d 天'
+          % (z['credits'], raw_ai, z['sessions'], z['days']))
+    if not cred:
+        assert raw_ai > 0, '国外版本机一条积分都没有? 那"不并"的理由就变了, 要重写说明'
+    # 双计保险: 会话 id 既不能撞上 CC Switch, 也不能撞上另一版
+    dY = h._read(stY)
+    assert not (z['sids'] & dY['all_sids']), '与 CC Switch 会话 id 相交 -> 会双计'
+    # 人造一个相交会话 -> merge_extra 必须整路拒绝, 一个数都不进
+    dC = _cp(dY)
+    m.merge_extra(dC, dict(z, sids=z['sids'] | {next(iter(dY['all_sids']))}))
+    zz = dC['extra'][key]
+    assert dC['reqs'] == dY['reqs'] and zz.get('clash') and not zz['by_day'], '人造相交没被拒绝'
+    print('    双计保险: 与 CC Switch %d 个会话 id 不相交 · 人造相交后整路拒绝(请求 %s 未变)'
+          % (len(dY['all_sids']), f"{dC['reqs']:,}"))
+if len(allZ) == 2 and allZ.get('workbuddy') and allZ.get('workbuddy-ai'):
+    ov = allZ['workbuddy']['sids'] & allZ['workbuddy-ai']['sids']
+    print('  两版会话 id 交集 %d (期望 0 —— 国内/国外各记各的账)' % len(ov))
+    assert not ov, '两版会话 id 相交 -> 会双计'
+# 缺目录: 整路缺席, 不崩也不碰任何数
+old = m.WB_SOURCES
+m.WB_SOURCES = [(os.path.join(tempfile.gettempdir(), 'no-such-workbuddy'), 'workbuddy', True),
+                (os.path.join(tempfile.gettempdir(), 'no-such-workbuddy-ai'), 'workbuddy-ai', False)]
+assert m.fetch_workbuddy(0, m.WB_SOURCES[0][0], 'workbuddy', True) is None
+dN = _cp(h._read(stY))
+before = (dN['reqs'], dN['real'], dN['hit'], len(dN.get('extra') or {}))
+m.merge_extra(dN, m.fetch_workbuddy(0, m.WB_SOURCES[0][0], 'workbuddy', True) or {})
+assert (dN['reqs'], dN['real'], dN['hit'], len(dN.get('extra') or {})) == before, \
+    '目录不存在却改动了对账数字'
+print('  缺目录: fetch 返回 None · 并入后 请求/净tok/命中率/extra 全不变 %s (期望 真)'
+      % int((dN['reqs'], dN['real'], dN['hit'], len(dN.get('extra') or {})) == before))
+m.WB_SOURCES = old
+# 横幅槽位: 全部档下六格 + 两行说明都必须被赋值, 且"仅国内"字样在位
+h.range_i = len(m.RANGES) - 1
+h.expanded, h.wide = True, True
+h.refresh(True)
+h.root.update()
+txtY = {k: h.cv.itemcget(h.ids['wb.' + k], 'text')
+        for k in ('cred', 'reqs', 'tok', 'sess', 'days', 'avg', 'v', 'rt')}
+for k, v in txtY.items():
+    print('    wb.%-5s %r' % (k, v))
+assert all(v for v in txtY.values()), '全部档横幅有空槽位(静默失效)'
+assert '仅国内' in h.cv.itemcget(h.ids['wb.credl'], 'text'), '积分格没写明只有国内版给得出'
+assert '不并' in txtY['rt'], '说明行没交代国外版积分为何不并'
 
 h.state.clear()
 h.state.update(ORIG_STATE)
