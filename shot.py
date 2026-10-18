@@ -63,13 +63,17 @@ def grab(name):
 
 def restore():
     """只回写本次测试改掉的键。以前是拿备份整份覆写, 会把这几秒里用户自己改的偏好
-    (拖过的圆点位置、改过的透明度)一起抹掉 —— 现在按键位还原。"""
+    (拖过的圆点位置、改过的透明度)一起抹掉 —— 现在按键位还原。
+    peek 必须在列: 拍图时面板会跟着测试用的版式重算落位并写回状态文件, 漏还原就等于
+    **把用户手拖过的圆点位置改掉了**(实测 2026-10-18 拍完从 2437,74 变成 2363,11)。
+    hollow 同理: 拍"关掉镂空"那张对照时会切一次, 切回去靠的是配对调用, 不能赌它配平了。"""
     load = lambda p: (json.load(open(p, encoding='utf-8')) if os.path.exists(p) else {})
     cur, orig = load(STATE), load(BAK)
-    cur.update({k: orig[k] for k in ('range', 'exp', 'wide') if k in orig})
+    keys = ('range', 'exp', 'wide', 'peek', 'hollow')
+    cur.update({k: orig[k] for k in keys if k in orig})
     with open(STATE, 'w', encoding='utf-8') as fh:
         json.dump(cur, fh, ensure_ascii=False)
-    print('还原 range/exp/wide · 其余键保持现状: %s' % sorted(cur))
+    print('还原 %s · 其余键保持现状: %s' % ('/'.join(keys), sorted(cur)))
 
 
 def cap():
