@@ -1581,6 +1581,60 @@ h.refresh()
 h.root.update()
 # 还原成**本次运行开始时**的用户偏好(以前是整份覆写成一个旧备份, 会把用户中途
 # 拖过的圆点位置、改过的范围一起抹掉)
+# T7 导出对账数据: 落盘位置 + 底栏文案。此前 verify 只测过 _redact_export(纯函数),
+#    从没真正调过 HUD.export() —— 于是「ROOTDIR 漏进 const.__all__, 星导入带不进 cchud.hud,
+#    export() 里裸引用抛 NameError, 又被 except Exception 吞成底栏一句'导出失败'」这个 bug
+#    在 112 条判据全绿的情况下漏网了。这一条把它钉死。
+assert hasattr(m, 'ROOTDIR'), \
+    'ROOTDIR 没从 cchud.const 星导入进来(它漏在 const.__all__ 里?) —— ' \
+    'HUD.export() 会因此抛 NameError 并被吞成底栏"导出失败"'
+_exp = os.path.join(m.ROOTDIR, 'ccswitch-对账数据.json')
+_old_note = h.note
+if os.path.exists(_exp):
+    os.remove(_exp)
+_refresh = h.refresh                  # export() 末尾会 refresh(True), 而 refresh 里
+h.refresh = lambda *a, **k: None      # 有 `note, self.note = self.note, None` 会把 note 消费掉
+
+
+def _tmp_name(nm):
+    return os.path.join(tempfile.gettempdir(), nm)
+
+
+_note_bad_target = _tmp_name('hud-export-note.json')
+for p in (_exp, _note_bad_target):
+    if os.path.exists(p):
+        os.remove(p)
+try:
+    assert m.ROOTDIR == os.path.dirname(m.STATE), \
+        'ROOTDIR 不是 STATE 所在目录: %r vs %r' % (m.ROOTDIR, os.path.dirname(m.STATE))
+    h.export()
+    _note = h.note
+    _written = os.path.exists(_exp)
+    _parsed = None
+    if _written:
+        with open(_exp, encoding='utf-8') as _f:
+            _parsed = json.load(_f)
+    print('  导出: note=%r · 落在 %s = %s · 可 json.loads = %s (顶层键 %s) (期望 已写出 / True / True)'
+          % (_note, os.path.basename(_exp), _written, _parsed is not None,
+             len(_parsed) if isinstance(_parsed, dict) else '非字典'))
+    assert not str(_note or '').startswith('导出失败'), \
+        'HUD.export() 失败(底栏: %r) —— 多半是 ROOTDIR 之类的基址没从 const 星导入进来' % (_note,)
+    assert _note == '已写出 ccswitch-对账数据.json', '导出成功的文案变了: %r' % (_note,)
+    assert _written, 'export() 说写成功, 但 %s 不存在' % _exp
+    assert isinstance(_parsed, dict) and _parsed, '导出的 JSON 解析不出非空字典'
+    # 再验一次「导出的内容确实是当前口径」: 至少要有请求数与成本这两个键, 且请求数 > 0
+    _k = [k for k in ('reqs', 'requests', 'total_reqs') if k in _parsed]
+    assert _k, '导出的 JSON 里找不到请求数键(现有键: %s)' % sorted(_parsed)[:12]
+finally:
+    h.refresh = _refresh
+    h.note = _old_note
+    if os.path.exists(_exp):
+        os.remove(_exp)               # 不留产物在工作区
+    if os.path.exists(_note_bad_target):
+        os.remove(_note_bad_target)
+assert not os.path.exists(_exp), '导出判据跑完没清理掉 ccswitch-对账数据.json'
+print('  导出判据跑完已清理产物 · 工作区无残留')
+
 print('=== U. 第三路 Qoder: 只并请求数+credits / token 拿不到 / 双计保险 / 缺目录 ===')
 h.expanded = True                     # 横幅只在"展开+宽版"才画, 前面各段把版式切来切去过
 h.wide = True
@@ -1876,7 +1930,9 @@ finally:
 # X4「CC Switch 消失 -> HUD 跟着退出」这条只能在独立子进程里验(一个进程建两个 HUD 会共用
 #     模块级精灵缓存, ImageTk 位图绑定 Tcl 解释器, 第二个实例一隐藏就报 pyimage doesn't exist)。
 #     子进程实测结果见 %TEMP%/hud_follow_quit.py 的输出; 这里只钉住代码路径不被改坏。
-src4 = open(r'G:\AIrenwu\cc-hud\cc-hud.pyw', encoding='utf-8').read()
+# 拆分后实现在 cchud/*.py 里: 源码文本判据改成扫「启动器 + 包」全部源码, 判据本身不变
+src4 = ''.join(open(_p, encoding='utf-8').read() for _p in
+               [r'G:\AIrenwu\cc-hud\cc-hud.pyw'] + sorted(glob.glob(r'G:\AIrenwu\cc-hud\cchud\*.py')))
 assert '暂不跟随退出' in src4 and src4.count('self.quit()') >= 2,     '跟随退出的两条分支(有定时不退 / 无定时退)被改掉了'
 print('  跟随退出分支在位: 定时未清不退 %s · 无定时跟着 quit %s (期望 真 / 真)'
       % (int('暂不跟随退出' in src4), int(src4.count('self.quit()') >= 2)))
