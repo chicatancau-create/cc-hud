@@ -12,6 +12,28 @@ m._dpi_aware()
 REAL_RUN_POWER = m.run_power        # J 段会把 m.run_power 打桩, T1 要拿真函数验参数
 import tkinter as tk
 
+
+# DSH 是**活数据源**: 正在跑的这个会话自己就在往 sessions/*.json 的 tokenUsage 累计值里加数
+# (实测 6s 涨 13.3 万 token)。N 段与 V8 都要"拿 HUD 的数"与"独立基线自己再读一遍"比对,
+# 两次读之间只要有别的会话落盘, 同一次运行就会随机红 —— 那是测试竞态, 不是代码错。
+# 所以整轮验证先把会话 json 复制成一份冻结快照, 再把 m.DSH_DIR 指过去(与 U 段换 QDIR 同一套
+# 打桩手法, 转发器会让 cchud.const/cchud.data 读到同一个值)。
+# 这样做**不是放宽判据**: 两条路径读的是同一份字节, 断言反而从"容差"收紧成精确相等。
+_REAL_DSH_DIR = m.DSH_DIR
+_DSH_SNAP = os.path.join(tempfile.gettempdir(), 'cc-hud-verify-dsh-snapshot')
+try:
+    if os.path.isdir(_DSH_SNAP):
+        import shutil
+        shutil.rmtree(_DSH_SNAP, ignore_errors=True)
+    if os.path.isdir(_REAL_DSH_DIR):
+        os.makedirs(_DSH_SNAP)
+        import shutil
+        for _p in glob.glob(os.path.join(_REAL_DSH_DIR, '*.json')):
+            shutil.copy2(_p, _DSH_SNAP)
+        m.DSH_DIR = _DSH_SNAP
+except OSError:
+    pass                    # 快照建不出来就照旧读真目录(可能偶发竞态, 但不至于跑不了)
+
 # 真机安全闸: 把 subprocess 的两个出口包起来, 全程记录有没有人碰过 shutdown。
 # (J 段的电源打桩只证明"桩被叫了几次", 证不了没有别的路径真调用 —— 这条才是外部证据)
 POWERCALLS = []
@@ -994,6 +1016,47 @@ def _wb_base(start, projects, with_credit):
     return n, 0.0, tk, cr, tt, psum, osum
 
 
+def _dsh_base(start):
+    """DSH 的**独立**基线: 自己 glob + json.load 一遍, 不借道 fetch_dsh。
+    返回 (轮次数, 成本恒 0, 四桶相加, {日: [轮次, in, out, rd, cc]}, {模型: [轮次, in+out]})。
+    只算 createdAt 归日 >= start 且四项非零的会话(空会话不计请求数)。"""
+    n = tk = 0
+    days, models = {}, {}
+    d0 = time.strftime('%Y-%m-%d', time.localtime(start)) if start else '0000-01-01'
+    for p in sorted(glob.glob(os.path.join(m.DSH_DIR, '*.json'))):
+        try:
+            with open(p, encoding='utf-8', errors='replace') as fh:
+                j = json.load(fh)
+            rec = j.get('record') or {}
+            rows = rec.get('rows') or {}
+            tot = ((rows.get('tokenUsage') or {}).get('val') or {}).get('totals') or {}
+            ca = (rec.get('identity') or {}).get('createdAt')
+            if not isinstance(ca, (int, float)):
+                continue
+            fi, o, rd, cc = (int(tot.get(k) or 0) for k in
+                             ('uncachedInputTokens', 'outputTokens', 'cacheReadTokens',
+                              'cacheWriteTokens'))
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue
+        if fi + o + rd + cc == 0:
+            continue
+        dte = dt.date.fromtimestamp(ca / 1000.0).isoformat()
+        if dte < d0:
+            continue
+        turns = int((((rows.get('sessionStats') or {}).get('val')) or {}).get('turns') or 0) or 1
+        mdl = str(((((rows.get('modelSelection') or {}).get('val')) or {}).get('lastUsed')
+                   or {}).get('model') or '(未记录)')
+        n += turns
+        tk += fi + o + rd + cc
+        v = days.setdefault(dte, [0, 0, 0, 0, 0])
+        for i, x in enumerate((turns, fi, o, rd, cc)):
+            v[i] += x
+        mv = models.setdefault(mdl, [0, 0])
+        mv[0] += turns
+        mv[1] += fi + o
+    return n, 0.0, tk, days, models
+
+
 EXTRA_BASE = {                      # (app, 独立取数)
     'zcode': lambda: (lambda c: (lambda r: (r[0], 0.0, r[1]))(c.execute(
         "select count(*), coalesce(sum(input_tokens+output_tokens+reasoning_tokens"
@@ -1009,6 +1072,8 @@ EXTRA_BASE = {                      # (app, 独立取数)
     # 所以这条对账同时管住了"缓存少减/多减"这一类错(实测少减写缓存会多算 29 万/34 万)。
     'workbuddy': lambda: _wb_base(st, m.WB_SOURCES[0][0], True)[:3],
     'workbuddy-ai': lambda: _wb_base(st, m.WB_SOURCES[1][0], False)[:3],
+    # 第九路 DSH: 同样是"并进所有视图"的源, 基线自己读一遍 json, 不借道 fetch_dsh
+    'dsh': lambda: _dsh_base(st)[:3],
 }
 for app, fn in EXTRA_BASE.items():
     try:
@@ -1768,10 +1833,10 @@ qc = ex['qoder-cn']
 assert qc['in'] == 0 and qc['out'] == 0 and qc['rd'] == 0 and qc['cc'] == 0
 print('  Qoder CN: 请求 %s · credits %.2f · token 四项 %s (期望 全 0)'
       % (qc['reqs'], qc['credits'], (qc['in'], qc['out'], qc['rd'], qc['cc'])))
-# V5 总量守恒仍然成立(八路一起)
+# V5 总量守恒仍然成立(九路一起)
 assert sum(a[1] for a in dv['apps']) == dv['reqs'] == sum(r[3] for r in dv['daily']) == sum(dv['hourly'])
 assert sum(r[2] for r in dv['daily']) == dv['real'] == dv['fresh_in'] + dv['out'] + dv['read'] + dv['creat']
-print('  八路合并后: 请求 %s (=Σ应用=Σ按天=Σ小时) · 净tok %s (=Σ按天=四项) · 成本 %.2f (=Σ应用)'
+print('  九路合并后: 请求 %s (=Σ应用=Σ按天=Σ小时) · 净tok %s (=Σ按天=四项) · 成本 %.2f (=Σ应用)'
       % (f"{dv['reqs']:,}", f"{int(dv['real']):,}", dv['cost']))
 # V6 面板上看得见, 且无定价这件事写明了
 h.refresh(True)
@@ -1803,8 +1868,161 @@ print('  三个源文件都不在: 红字 %d · 请求 %s -> 恢复后 %s (期�
       % (nf, f"{d0v['reqs']:,}", f"{h._read(st)['reqs']:,}"))
 assert nf == 0 and d0v['reqs'] < dv['reqs']
 assert h._read(st)['reqs'] == dv['reqs'] or abs(h._read(st)['reqs'] - dv['reqs']) <= 5
+# V8 第九路 DSH: 会话级累计账 —— 缺目录不崩 / 数值与独立基线逐项相等 / 归日与 createdAt 一致
+#    / 小时只能记到创建时刻(近似, 但必须守恒) / 并入总账守恒 / 面板上看得见
+#    (本段自己一份浅拷贝: Y 段的 _cp 在下面才定义, 这里不能借用)
 
-print('=== W. 今日档按小时条形图: 八路小时守恒 / 画法切换 / 悬停 / 无残留 ===')
+
+def _cpv(b):
+    c = dict(b)
+    for k in ('daily', 'apps', 'models', 'hourly'):
+        c[k] = list(b[k])
+    c['htok'] = [dict(x) for x in b['htok']]
+    c['extra'] = dict(b.get('extra') or {})
+    c['model_names'] = set(b.get('model_names') or ())
+    c['app_parts'] = dict(b.get('app_parts') or {})
+    return c
+
+
+dsh = m.fetch_dsh(0)
+assert dsh is not None, '本机 %s 读不到任何 DSH 会话, 这一段无从验起' % m.DSH_DIR
+nD, _cD, tkD, daysD, modelsD = _dsh_base(0)
+bdD = dsh['by_day']
+print('  DSH: 轮次 %s = 独立基线 %s · 净输入 %s · 输出 %s · 命中 %s · 缓存写 %s · %d 天 / %d 会话'
+      % (f"{dsh['reqs']:,}", nD, f"{dsh['in']:,}", f"{dsh['out']:,}", f"{dsh['rd']:,}",
+         f"{dsh['cc']:,}", dsh['days'], dsh['sessions']))
+# 1 数值正确性: 四项逐项与独立基线相等(不拿 HUD 自己的数自证)
+assert dsh['reqs'] == nD, 'DSH 轮次数与独立基线不符: %s vs %s' % (dsh['reqs'], nD)
+assert sum(v['in'] for v in bdD.values()) == sum(v[1] for v in daysD.values())
+assert sum(v['out'] for v in bdD.values()) == sum(v[2] for v in daysD.values())
+assert sum(v['rd'] for v in bdD.values()) == sum(v[3] for v in daysD.values())
+assert sum(v['cc'] for v in bdD.values()) == sum(v[4] for v in daysD.values())
+assert dsh['in'] + dsh['out'] + dsh['rd'] + dsh['cc'] == tkD, '四桶相加与独立基线不符'
+# 2 归日正确: 键都是 YYYY-MM-DD, 且集合与 createdAt 换算出来的日子一致
+assert all(re.fullmatch(r'\d{4}-\d{2}-\d{2}', k) for k in bdD), \
+    'by_day 键不是 YYYY-MM-DD: %s' % list(bdD)
+assert set(bdD) == set(daysD), '归日与 createdAt 换算不一致: %s vs %s' % (sorted(bdD), sorted(daysD))
+for k in bdD:
+    assert bdD[k]['reqs'] == daysD[k][0] and bdD[k]['in'] == daysD[k][1] \
+        and bdD[k]['out'] == daysD[k][2] and bdD[k]['rd'] == daysD[k][3] \
+        and bdD[k]['cc'] == daysD[k][4], 'DSH %s 当天数与独立基线不符' % k
+# 2b 归日**反向**校验(上面 2 只证"两条路径算得一样", 证不了换算本身对):
+#    _dsh_base 与 fetch_dsh 用的是同一句 ca/1000 换算, 若那句本身写错(例如错减 86400、
+#    或把毫秒当秒用), 两边会错得一模一样 -> 2 照样绿。所以这里绕开 daysD 与 fromtimestamp,
+#    直接从原始毫秒值独立算一遍日子: 取 UTC 纪元偏移时区再手动加本地偏移, 与 by_day 对。
+_utc_off = -time.timezone if not time.daylight else -time.altzone
+for _p in sorted(glob.glob(os.path.join(m.DSH_DIR, '*.json'))):
+    try:
+        with open(_p, encoding='utf-8', errors='replace') as _fh:
+            _j = json.load(_fh)
+        _rec = _j.get('record') or {}
+        _rows = _rec.get('rows') or {}
+        _tot = ((_rows.get('tokenUsage') or {}).get('val') or {}).get('totals') or {}
+        _ca = (_rec.get('identity') or {}).get('createdAt')
+        _s = sum(int(_tot.get(_k) or 0) for _k in
+                 ('uncachedInputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'))
+    except (OSError, ValueError, TypeError, AttributeError):
+        continue
+    if not isinstance(_ca, (int, float)) or _s == 0:
+        continue
+    # 纯算术: 毫秒 -> 本地日。用 time.gmtime 取 UTC 年月日, 与"本地日"这条路径完全不同源。
+    _local_sec = _ca / 1000.0 + _utc_off
+    _d_utc = time.gmtime(_local_sec)
+    _dte_calc = '%04d-%02d-%02d' % (_d_utc.tm_year, _d_utc.tm_mon, _d_utc.tm_mday)
+    # 与本机用 fromtimestamp 得到的那天核对(若两者不等, 是时区换算本身有错, 先炸出来)
+    assert _dte_calc == dt.date.fromtimestamp(_ca / 1000.0).isoformat(), \
+        ('DSH 归日换算本身不一致: 算术法 %s vs fromtimestamp %s (%s)'
+         % (_dte_calc, dt.date.fromtimestamp(_ca / 1000.0).isoformat(), os.path.basename(_p)))
+    assert _dte_calc in bdD, \
+        'DSH 会话 %s 应为 %s, 但 by_day 里没有这一天: %s' % (
+            os.path.basename(_p), _dte_calc, sorted(bdD))
+print('    归日 %s (与 createdAt 换算的 %d 天逐一相等)'
+      % (', '.join('%s:%d轮' % (k, bdD[k]['reqs']) for k in sorted(bdD)), len(daysD)))
+# 3 模型表: 全部模型都计入(不做 deepseek 筛选), 且 [轮次, in+out] 与独立基线相等
+assert dsh['models'] == modelsD, 'DSH 模型表与独立基线不符: %s vs %s' % (dsh['models'], modelsD)
+assert len(dsh['models']) >= 2, 'DSH 只并进 %d 个模型, 全模型计入的口径没落实' % len(dsh['models'])
+print('    模型 %s' % ', '.join('%s:%d轮/%s' % (k, v[0], f"{v[1]:,}")
+                                for k, v in sorted(dsh['models'].items(), key=lambda x: -x[1][1])))
+# 4 小时口径: 只能记到创建时刻(近似), 但 Σ小时 / Σhtok 必须与总量逐项守恒 ——
+#   这一条正是本路口径的核心: 没把累计值平摊到多个小时, 也没让小时视图与总量脱节
+htD = m.hourly_rows(dsh['htok'])
+assert sum(dsh['hourly']) == dsh['reqs'] == sum(v['reqs'] for v in bdD.values()), \
+    'DSH Σ小时 != 总轮次 = 今日档条形会少画'
+assert sum(sum(v['hours']) for v in bdD.values()) == dsh['reqs'], 'DSH 逐日 hours 与轮次不守恒'
+assert sum(r[3] for r in htD) == dsh['reqs'], 'DSH htok 请求数与轮次不守恒'
+assert sum(r[2] for r in htD) == tkD, 'DSH htok token 与四桶总量不守恒'
+assert dsh['h1'] == sum(v['h1'] for v in bdD.values()) and dsh['h1'] <= dsh['reqs'], \
+    'DSH 近1小时与逐日 h1 不守恒(或超过总轮次)'
+print('    Σ小时 %s = 总轮次 %s · Σhtok token %s = 四桶 %s (记到创建时刻, 近似)'
+      % (f"{sum(dsh['hourly']):,}", f"{dsh['reqs']:,}",
+         f"{sum(r[2] for r in htD):,}", f"{tkD:,}"))
+# 5 并入总账守恒: reqs / real 的增量 == DSH 自己的值, 且各视图仍然互相对平
+dD = _cpv(h._read(st))
+b0 = (dD['reqs'], dD['real'], dD['cost'])
+nDs = m.fetch_dsh(st)
+assert nDs is not None, '范围档下 DSH 应当仍有量'
+m.merge_extra(dD, nDs)
+assert dD['reqs'] == b0[0] + nDs['reqs'], '并入后请求数增量 != DSH 的轮次'
+assert abs(dD['real'] - (b0[1] + nDs['in'] + nDs['out'] + nDs['rd'] + nDs['cc'])) < 1, \
+    '并入后真实消耗增量 != DSH 四桶'
+assert abs(dD['cost'] - b0[2]) < 1e-9, 'DSH 不该产生美元成本'
+assert sum(a[1] for a in dD['apps']) == dD['reqs'] == sum(r[3] for r in dD['daily']) \
+    == sum(dD['hourly']) == sum(b['reqs'] for b in dD['htok']), \
+    'DSH 并进来之后总账不再自洽(应用/按天/小时/htok 有一处没并齐)'
+assert abs(sum(r[2] for r in dD['daily']) - dD['real']) < 1, 'DSH 并进来之后按天净 tok 与总量脱节'
+print('    并入守恒: 请求 %s + %s = %s (=Σ应用=Σ按天=Σ小时=Σhtok) · 净tok %s + %s = %s · 成本未变 %s'
+      % (f"{b0[0]:,}", f"{nDs['reqs']:,}", f"{dD['reqs']:,}",
+         f"{int(b0[1]):,}", f"{nDs['in'] + nDs['out'] + nDs['rd'] + nDs['cc']:,}",
+         f"{int(dD['real']):,}", int(abs(dD['cost'] - b0[2]) < 1e-9)))
+# 6 双计保险: DSH 的会话 uuid 一旦出现在 CC Switch 里就整路拒绝并入(与其它额外源同一套)
+baseD = h._read(st)
+assert not (dsh['sids'] & set(baseD['all_sids'])), 'DSH 会话 id 与 CC Switch 相交 -> 会双计'
+dC2 = _cpv(baseD)
+m.merge_extra(dC2, dict(dsh, sids=dsh['sids'] | {next(iter(baseD['all_sids']))}))
+assert dC2['reqs'] == baseD['reqs'] and dC2['extra']['dsh'].get('clash'), \
+    '人造会话 id 相交后 DSH 没被拒绝并入'
+print('    双计保险: 与 CC Switch %d 个会话 id 不相交 · 人造相交后整路拒绝(请求 %s 未变)'
+      % (len(baseD['all_sids']), f"{dC2['reqs']:,}"))
+# 7 缺目录: 整路缺席、返回 None、不崩、不碰任何数, 也不影响其它八路
+real_dsh_dir = m.DSH_DIR
+m.DSH_DIR = os.path.join(tempfile.gettempdir(), 'no-such-dsh-dir')
+try:
+    assert m.fetch_dsh(0) is None, 'DSH 目录不存在却返回了账'
+    assert m.fetch_dsh(st) is None, 'DSH 目录不存在却返回了范围账'
+    dM = _cpv(h._read(st))
+    beforeM = (dM['reqs'], dM['real'], dM['hit'], len(dM.get('extra') or {}))
+    m.merge_extra(dM, m.fetch_dsh(0) or {})
+    assert (dM['reqs'], dM['real'], dM['hit'], len(dM.get('extra') or {})) == beforeM, \
+        'DSH 目录不存在却改动了对账数字'
+    assert set(dM.get('extra') or {}) == set(dv.get('extra') or {}) - {'dsh'}, \
+        'DSH 缺席时其它八路的 extra 被动了: %s' % sorted(dM.get('extra') or {})
+    h.refresh(True)
+    h.root.update()
+    assert not h.cv.find_withtag('fatal'), 'DSH 目录不存在时面板出了红字'
+    print('    缺目录: fetch 返回 None · 请求/净tok/命中率/extra 全不变 1 · 红字 0 · '
+          '其它八路仍在 %s' % sorted(set(dM.get('extra') or {})))
+finally:
+    m.DSH_DIR = real_dsh_dir
+h.refresh(True)
+h.root.update()
+# 8 面板上看得见: 应用表或横幅明细里必须出现 DSH(并进来却看不见 = 用户视角没有这一路)
+txtD = {k: h.cv.itemcget(t, 'text') for k, t in h.ids.items()
+        if isinstance(t, int) and h.cv.type(t) == 'text'}
+provD = ' '.join(v for k, v in txtD.items() if k.startswith('prov.n'))
+qvD = txtD.get('qoder.v', '')
+assert 'DSH' in provD or 'DSH' in qvD, 'DSH 既不在应用表也不在横幅 = 并进来却看不见'
+print('    面板可见: 应用表 %s · 横幅 %s' % ('DSH' in provD, 'DSH' in qvD))
+# 快照是临时产物, 不许留在 %TEMP% 里(与 T7 导出判据同一套收尾纪律)
+m.DSH_DIR = _REAL_DSH_DIR
+try:
+    import shutil as _sh
+    _sh.rmtree(_DSH_SNAP, ignore_errors=True)
+except OSError:
+    pass
+print('    DSH 判据跑完: 已切回真目录 %s · 临时快照已清理 %s'
+      % (os.path.basename(_REAL_DSH_DIR), not os.path.isdir(_DSH_SNAP)))
+
+print('=== W. 今日档按小时条形图: 九路小时守恒 / 画法切换 / 悬停 / 无残留 ===')
 h.expanded = True
 h.wide = True
 h.range_i = 0                                        # 今日
@@ -1819,7 +2037,7 @@ sr = sum(b['reqs'] for b in ht)
 st = sum(b['in'] + b['out'] + b['rd'] + b['cc'] for b in ht)
 sc = sum(b['cost'] for b in ht)
 g = lambda k: h.cv.itemcget(h.ids[k], 'text') if k in h.ids else '<无槽位>'
-print('  八路逐小时: Σ请求 %s == 总请求 %s · Σ净tok %s == 真实消耗 %s · Σ成本 %.2f == 总成本 %.2f'
+print('  九路逐小时: Σ请求 %s == 总请求 %s · Σ净tok %s == 真实消耗 %s · Σ成本 %.2f == 总成本 %.2f'
       % (sr, d0w['reqs'], format(int(st), ','), format(int(d0w['real']), ','), sc, d0w['cost']))
 assert sr == d0w['reqs'], '有源的请求没落到小时桶 = 条形会少画'
 assert abs(st - d0w['real']) < 1, '逐小时 token 与真实消耗不等 = 柱高与顶部数字对不上'

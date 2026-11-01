@@ -10,6 +10,7 @@ ROOTDIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 __all__ = [
     'DB', 'QDIR', 'QDIR_CN', 'ZCODE_DB', 'HERD_LOG', 'CODEX_DIRS', 'WB_SOURCES', 'HDB_SUB',
+    'DSH_DIR',
     '_QODER_FILES', '_HAHA_FILES', '_WB_FILES', 'NEWDAY', 'ROOTDIR', 'STATE', 'QUIT_MARK', 'REFRESH_MS',
     'POLL_MS', 'CC_TICKS', 'RANGES', 'ALPHAS', 'CARD_W', 'WIDE_W', 'CHIP_BLOCK_W', 'PAD', 'PEEK',
     'CARD_LBL_DY', 'CARD_VAL_DY', 'BG', 'CARD', 'CARD2', 'EDGE', 'TRACK', 'FG', 'DIM', 'FAINT',
@@ -55,6 +56,13 @@ WB_SOURCES = [(os.path.join(os.path.expanduser('~'), '.workbuddy', 'projects'),
 # 10-08 之后搬到 E:\cc-haha), 写死任一路径都会静默读到一份不再更新的旧索引 —— 所以这里按候选位置
 # 逐个找、取 mtime 最新的那个。找法与 cc-haha 自己的扫描根一致: <配置目录>\cc-haha\db\index-v1.sqlite。
 HDB_SUB = os.path.join('cc-haha', 'db', 'index-v1.sqlite')
+
+
+# DSH(DeepSeek Harness)的会话用量缓存(第九路)。一个会话一份 json, 里面只有
+# `record.rows.tokenUsage.val.totals` 这个**会话级累计值**, 没有逐次调用的时间戳 ——
+# 所以这一路只能按 `record.identity.createdAt` 归到"会话创建那天", 给不出小时分布。
+DSH_DIR = os.path.join(os.path.expanduser('~'), '.dsh', 'storages', 'session_projcache',
+                       'sessions')
 
 
 _QODER_FILES = {}         # Qoder 会话 jsonl 的按文件解析缓存(同 _HAHA_FILES 一套做法)
@@ -153,4 +161,5 @@ APP_ALIAS = {'codex': 'Codex', 'claude': 'Claude Code', 'claude-desktop': 'Claud
              'openclaw': 'OpenClaw', 'hermes': 'Hermes', 'pi': 'Pi', 'minimax': 'MiniMax Code',
              'qoder': 'Qoder', 'qoder-cn': 'Qoder CN', 'zcode': 'ZCode',
              'workbuddy': 'WorkBuddy 国内', 'workbuddy-ai': 'WorkBuddy 国外',
-             'herdsman': '牧羊人(本地)'}        # 不走代理的直连客户端, 见 fetch_qoder/fetch_zcode
+             'herdsman': '牧羊人(本地)', 'dsh': 'DSH'}
+# ^ 不走代理的直连客户端, 见 fetch_qoder/fetch_zcode/fetch_dsh

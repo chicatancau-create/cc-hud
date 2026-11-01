@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""cc-hud 数据层: 八路数据源的取数与合并。"""
+"""cc-hud 数据层: 九路数据源的取数与合并。"""
 import datetime as dt
+import glob
 import json
 import os
 import re
@@ -15,6 +16,7 @@ __all__ = [
     'hourly_rows', 'spread_cost', 'fetch', 'dur', '_fold_hours', 'fetch_haha', '_parse_qoder',
     'qoder_days', 'fetch_qoder', '_src', '_newday', 'fetch_zcode', 'fetch_herdsman',
     'fetch_codex_gap', '_wb_ts', '_wb_rows', 'fetch_workbuddy', 'merge_qoder', 'merge_haha',
+    'fetch_dsh',
 ]
 
 
@@ -1142,6 +1144,87 @@ def fetch_workbuddy(start, projects, key, with_credit):
     z = _src(key, APP_ALIAS.get(key, key), key, by_day, sids, hourly, h1, int(last),
              models, 'prompt 含缓存读与写(两项均已拆出) · 本机不记钱'
              + ('' if with_credit else ' · 国外版积分两本账互相矛盾, credits 不并'))
+    z['htok'] = htok
+    return z
+
+
+def fetch_dsh(start):
+    """DSH(DeepSeek Harness)的会话用量: `~/.dsh/storages/session_projcache/sessions/*.json`
+    每个会话一份 `record.rows.tokenUsage.val.totals` 累计值, 上游**没有逐次调用的时间戳**
+    —— 所以只能按 `record.identity.createdAt`(会话创建时刻)归日, 小时也只能记到那个钟点上,
+    **归属是近似的**(与 fetch_codex_gap 同一套口径: 一个会话可能跨了几小时, 全记在创建那一小时)。
+    不把累计值平均摊到多个小时 —— 那是编的; 记到唯一已知的那个时刻并标注近似, 是可核对的事实。
+
+    口径(实测 32 个会话文件, 其中 7 个一条 token 都没有 -> 空会话跳过, 不占请求数):
+      `uncachedInputTokens` 就是**不含缓存读**的新增输入(与 codex 回填那种"input 含缓存读"
+      不是一回事), 所以四项直接相加 = 真实消耗, 不需要再减任何一项;
+      `cacheWriteTokens` 本机全部为 0 —— 那是上游没记, 不是这里漏读。
+      `reqs` 取 `sessionStats.val.turns`(真实轮次数), 缺失/为 0 时按 1 计;
+      小时格与 htok 按**同一份 reqs** 落到创建时刻那一小时, 保证 Σ小时 == Σ按天 == 总请求;
+      `models` 取 `modelSelection.val.lastUsed.model`, 值是 [轮次数, 新增输入+输出]
+      —— 一个会话只记了一个"最后使用的模型", 所以模型表的请求数只能按会话计。
+      全部模型都计入(deepseek 系与 kimi-k3-1 等一视同仁), 不做任何筛选。
+    成本/credits: 这一路不产生美元成本也不产生积分, 一律 0。
+    """
+    if not os.path.isdir(DSH_DIR):
+        return None
+    d0 = time.strftime('%Y-%m-%d', time.localtime(start)) if start else '0000-01-01'
+    by_day, sids, models = {}, set(), {}
+    hourly = [0] * 24
+    htok = new_hourly()
+    h1 = last = 0
+    now = time.time()
+    for path in sorted(glob.glob(os.path.join(DSH_DIR, '*.json'))):
+        try:
+            with open(path, encoding='utf-8', errors='replace') as fh:
+                j = json.load(fh)
+            rec = j.get('record') or {}
+            rows = rec.get('rows') or {}
+            ident = rec.get('identity') or {}
+            tot = ((rows.get('tokenUsage') or {}).get('val') or {}).get('totals') or {}
+            stt = ((rows.get('sessionStats') or {}).get('val')) or {}
+            msel = ((rows.get('modelSelection') or {}).get('val')) or {}
+            ca = ident.get('createdAt')
+            if not isinstance(ca, (int, float)):
+                continue
+            fi = int(tot.get('uncachedInputTokens') or 0)
+            o = int(tot.get('outputTokens') or 0)
+            rd = int(tot.get('cacheReadTokens') or 0)
+            cc = int(tot.get('cacheWriteTokens') or 0)
+        except (OSError, ValueError, TypeError, AttributeError):
+            continue                    # 坏文件/半截文件: 跳过这一个, 不拖垮整路
+        if fi + o + rd + cc == 0:
+            continue                    # 空会话: 不计请求数, 免得把总请求数灌水
+        ep = ca / 1000.0                # createdAt 是**毫秒**
+        if ep > last:
+            last = ep
+        dte = dt.date.fromtimestamp(ep).isoformat()
+        if dte < d0:                    # 会话创建日早于范围起点 -> 整份不算
+            continue
+        turns = int(stt.get('turns') or 0) or 1
+        hh = time.localtime(ep).tm_hour
+        d = by_day.setdefault(dte, _newday())
+        d['reqs'] += turns
+        d['in'] += fi
+        d['out'] += o
+        d['rd'] += rd
+        d['cc'] += cc
+        d['hours'][hh] += turns
+        hourly[hh] += turns
+        add_hour(htok, hh, fi, o, rd, cc, turns)   # 只有会话级时间戳, 小时归属是近似的
+        if ep >= now - 3600:
+            d['h1'] += turns
+            h1 += turns
+        sids.add(os.path.basename(path)[:-5])
+        mdl = str(((msel.get('lastUsed') or {}).get('model')) or '(未记录)')
+        m = models.setdefault(mdl, [0, 0])
+        m[0] += turns
+        m[1] += fi + o
+    if not by_day:
+        return None
+    z = _src('dsh', 'DSH', 'dsh', by_day, sids, hourly, h1, int(last),
+             models, 'DSH 会话累计 · 只有会话创建时刻, 小时归属是近似的 · '
+                     '缓存写为 0 是上游未记 · 不记钱')
     z['htok'] = htok
     return z
 

@@ -750,7 +750,9 @@ class HUD:
                   lambda: fetch_workbuddy(start, WB_SOURCES[0][0], WB_SOURCES[0][1],
                                           WB_SOURCES[0][2]),
                   lambda: fetch_workbuddy(start, WB_SOURCES[1][0], WB_SOURCES[1][1],
-                                          WB_SOURCES[1][2])):
+                                          WB_SOURCES[1][2]),
+                  # 第九路: DSH(DeepSeek Harness) 的会话级累计账, 只有创建日没有小时
+                  lambda: fetch_dsh(start)):
             try:
                 merge_extra(d, f() or {})
             except Exception as e:
