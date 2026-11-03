@@ -751,8 +751,9 @@ class HUD:
                                           WB_SOURCES[0][2]),
                   lambda: fetch_workbuddy(start, WB_SOURCES[1][0], WB_SOURCES[1][1],
                                           WB_SOURCES[1][2]),
-                  # 第九路: DSH(DeepSeek Harness) 的会话级累计账, 只有创建日没有小时
-                  lambda: fetch_dsh(start)):
+                  # 第九路: DSH(DeepSeek Harness) 的会话级累计账 —— 只补 CC Switch 零行的会话
+                  # (实测本机 DSH 走代理, 26 个有账会话与库里 app_type='dsh' 逐位相等, 整份并就是双计)
+                  lambda: fetch_dsh(start, d.get('all_sids') or set())):
             try:
                 merge_extra(d, f() or {})
             except Exception as e:
@@ -1599,9 +1600,13 @@ class HUD:
         pl = self._power_line() if (self.deadline or self.fired) else None
         # 倒计时优先于一次性提示: 刚点完「到点关机」会带一句 note, 但那 30 分钟里
         # 用户要看的是还剩多久(而且 note 已被消费, 不会延后弹出来捣乱)。
-        self._put('foot.m', self._fit(pl or note or '%s · 末次 %s · 库%.1fMB'
+        # 「额外源无本机定价」从应用卡状态行挪到这里: 那句是全局口径声明, 底栏整条宽都是
+        # 它的余量, 不会像卡内 256px 那样被省略号吃掉半句(见 prov.rt 处的说明)。
+        price_note = (' · 额外源无本机定价'
+                      if [x for x in (d.get('extra') or {}).values() if x.get('in')] else '')
+        self._put('foot.m', self._fit(pl or note or '%s · 末次 %s · 库%.1fMB%s'
                                       % ('● LIVE' if fresh else '○ 数据较旧',
-                                         stamp(d['last']), d['dsize']), self.f_tiny, self.mid_w),
+                                         stamp(d['last']), d['dsize'], price_note), self.f_tiny, self.mid_w),
                   PK if pl else (GR if fresh else DIM))
 
         if self.root.winfo_height() != self._H or self.root.winfo_width() != self.W:
@@ -1877,13 +1882,29 @@ class HUD:
         self._set('c8.rt', '取自 codex 的 proxy_config')
         # 状态码只有 CC Switch 记, 并进来 cc-haha 的响应后「成功+失败」必然小于总请求数,
         # 不写分母就是数字对不上。
-        self._set('prov.rt', self._fit(
-            '状态(仅CC Switch %s次) 成功%s·失败%s%s'
-            % (f"{int(d['ok']) + int(d['fail']):,}", f"{int(d['ok']):,}", f"{int(d['fail']):,}",
-               ('' if not nhide else ' · +%d接口未列' % nhide)
-               + ('' if not [x for x in (d.get('extra') or {}).values() if x.get('in')]
-                  else ' · 额外源无本机定价')),
-            self.f_micro, self._cardw('prov') - int(round(74 * s))))
+        # 「额外源无本机定价」原来也挂在这行末尾 —— 这一行的真正余量是**标题右沿到卡右沿**
+        # (宽版实测 256px), 而预算写的是 cardw-74=281px, 三个声明(分母/未列/不计价)拼到 319px
+        # 时被 _fit 截成「额外…」: 声明在代码里、在用户眼里都不存在。所以那句挪到**底栏**
+        # (foot.m, 余量是整条底栏宽), 这里只留表格自己的「+%d接口未列」。
+        # 「未列」自己也要防被省略号截成「+4接口未…」: 先长写法, 挤不下退短写法, 再挤就整条不写
+        # (分母那句是硬信息, 不能被一个计数挤掉)。
+        # 预算按**真实几何**算: rt 锚点(卡右沿-11) - 标题位图右沿 - 8。原来写死的 cardw-74 在宽版
+        # 应用卡上等于 281px, 而真实余量是 256px —— 那 25px 的差就是文字压到标题上的量。
+        _px = self._cardw('prov') - int(round(74 * s))
+        try:
+            _ti = self.cv.bbox(self.ids['prov.ti'])
+            _px = min(_px, int(self.cv.coords(self.ids['prov.rt'])[0]) - _ti[2] - int(round(8 * s)))
+        except (KeyError, IndexError, TypeError):
+            pass
+        _st = '状态(仅CC Switch %s次) 成功%s·失败%s' % (
+            f"{int(d['ok']) + int(d['fail']):,}", f"{int(d['ok']):,}", f"{int(d['fail']):,}")
+        _rt = _st
+        for _cand in ((_st + (' · +%d接口未列' % nhide)) if nhide else _st,
+                      (_st + (' · +%d未列' % nhide)) if nhide else _st):
+            if self.f_micro.measure(_cand) <= _px:
+                _rt = _cand
+                break
+        self._set('prov.rt', self._fit(_rt, self.f_micro, _px))
         self._set('model.rt', '本范围%d个模型·展示成本前4' % d['nmodel'])
 
         hb = d.get('haha')

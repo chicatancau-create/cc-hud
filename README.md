@@ -1,12 +1,12 @@
 # cc-hud
 
-Windows 桌面的 CC Switch 用量悬浮统计 HUD：单文件 tkinter 自绘面板，只读地把**本机八个 AI 客户端**的用量账合并成一个总量，并自带一套 A–Z 取证门禁（`verify.py`，27 段 115 条 assert，退出码 0 才算绿）。
+Windows 桌面的 CC Switch 用量悬浮统计 HUD：tkinter 自绘面板（主程序 `cc-hud.pyw` + `cchud/` 包），只读地把**本机九个 AI 客户端/会话账本**的用量合并成一个总量，并自带一套 A–Z 取证门禁（`verify.py`，27 段 167 条 assert，退出码 0 才算绿）。
 
 本仓库面向代码审计者，因此下面「数据口径与守恒不变量」「已知未决」两节是重点——它们就是 bug 的藏身处和判定标准。
 
 ## ✨ 功能特性
 
-- **八路合并**：CC Switch 代理库 + cc-haha(Claude Code 壳) + Qoder + Qoder CN + ZCode + 牧羊人(Herdsman) + Codex 未被 CC Switch 回填的会话 + **WorkBuddy 国内版与国外版**
+- **九路合并**：CC Switch 代理库 + cc-haha(Claude Code 壳) + Qoder + Qoder CN + ZCode + 牧羊人(Herdsman) + Codex 未被 CC Switch 回填的会话 + **WorkBuddy 国内版与国外版** + DSH(DeepSeek Harness) 会话级累计账
 - **口径一致**：净 token 一路到底（回填类数据源的 `input_tokens` 含缓存读、WorkBuddy 还含缓存写，先拆再算），任何视图相加都等于总量
 - **双计保险**：每一路都按会话 id 与 CC Switch 求交集，一旦相交**整路拒绝并入**，宁可少计不双计
 - **面板落位**：点圆球 → 小面板一定浮到最前，并沿圆球**向左下方**展开（面板右上角钉在圆球右上角）；点「展开大面板」→ 大面板落在**工作区正中**（让开任务栏）。居中只管"小→大那一次切换"，之后随便拖，刷新不会把它拽回去（`verify.py` Z 段逐条量像素）
@@ -43,10 +43,10 @@ python -c "import tkinter, sqlite3, ctypes; from PIL import Image, ImageDraw, Im
 # 1) 数据层单测（3 项，不碰界面）
 python -X utf8 -m unittest test_data -v
 
-# 2) 全量取证门禁（A–Z，27 段 115 条 assert，跑数分钟；退出码 0 = 全绿）
+# 2) 全量取证门禁（A–Z，27 段 167 条 assert，跑数分钟；退出码 0 = 全绿）
 python -X utf8 verify.py
 
-# 3) 跑起来（无控制台窗口）
+# 3) 跑起来（无控制台窗口）—— 桌面快捷方式「CC Switch HUD.lnk」就是这一条命令
 pythonw cc-hud.pyw
 
 # 4) 重拍三条版式的实拍证据
@@ -60,14 +60,19 @@ python -X utf8 shot.py
 ## 📁 目录结构
 
 ```
-cc-hud.pyw          主程序（单文件）：数据层 fetch/merge_* → 版式 _layout/_cX → 绘制 paint
+cc-hud.pyw          入口 + 口径说明（薄壳：导入 cchud 包，`verify.py` 仍以它为模块打桩）
+cchud/              实现包：const(常量/别名) data(九路取数与合并) hud(版式与交互) render(PIL 位图)
+                    pop(自绘菜单) power(定时电源) sysw(托盘/进程/DPI/PrintWindow) util(格式化)
 follow-probe.pyw    开机一次性判定器（决定"要不要拉起 HUD"，判完即退）
 verify.py           A–Z 取证门禁套件
 test_data.py        数据层单元测试（缓存失效、重复响应取末次、导出 URL 脱敏）
 shot.py             三条版式 + 镂空对照的 PrintWindow 实拍取证
-start-hud.bat       手动启动入口（pythonw + 无控制台）
+start-hud.bat       手动启动入口（钉死 D:\PyCharm\Python\pythonw.exe，先自检 tkinter/Pillow 再 start）
+cc-hud.ico          桌面快捷方式的图标（7 帧 16–256px，全部无压缩 BMP 帧）
 hud-state.json      运行时用户偏好（已 gitignore，不入库）
 ```
+
+桌面入口：`%USERPROFILE%\Desktop\CC Switch HUD.lnk` → `pythonw.exe "G:\AIrenwu\cc-hud\cc-hud.pyw"`（隐藏窗口、带上面这个 ico）。程序本身有命名互斥体闸门，重复点击不会再叠一张卡片。
 
 ## 🔌 数据源与口径
 
@@ -83,6 +88,7 @@ hud-state.json      运行时用户偏好（已 gitignore，不入库）
 | Codex 未回填 | `~\.codex\sessions` + `archived_sessions` | 会话级四项 token | 逐请求小时归属（只有会话级时间戳） |
 | WorkBuddy 国内版 | `~\.workbuddy\projects\**\*.jsonl` → `providerData.rawUsage` | 逐请求四项 token、模型、官方积分(credits) | 成本（本机不记美元）、状态码、延迟 |
 | WorkBuddy 国外版 | `~\.workbuddy-ai\projects\**\*.jsonl`（含 `subagents/`，归父会话） | 逐请求四项 token、模型 | **credits**（两本账互相矛盾，见下）、成本、状态码、延迟 |
+| DSH | `~\.dsh\storages\session_projcache\sessions\*.json` → `tokenUsage` 累计值 | 会话级四项 token、模型、轮次 | 逐请求小时归属（只有会话创建时刻）、成本（本机不记钱） |
 
 ### 净 token 口径（最容易出错的地方）
 
@@ -119,11 +125,13 @@ hud-state.json      运行时用户偏好（已 gitignore，不入库）
 
 ### 双计保险
 
-每路带一个会话/请求 id 集合，与 CC Switch 的 `all_sids` 求交集；非空则**整路拒绝并入**并在面板写明。实测当前交集为 0（Qoder 243 个会话 vs CC Switch 1119 个；WorkBuddy 两版 29 个会话与 CC Switch、以及**两版彼此之间**也都是 0 交集）。
+每路带一个会话/请求 id 集合，与 CC Switch 的 `all_sids` 求交集；非空则**整路拒绝并入**并在面板写明。实测当前交集为 0（Qoder 263 个会话 vs CC Switch 1170 个；WorkBuddy 两版 29 个会话与 CC Switch、以及**两版彼此之间**也都是 0 交集）。
+
+**DSH 是唯一"整路相交"的一路**：本机 DSH 就挂在 CC Switch 代理后面，库里 `app_type='dsh'` 的 3020 行 / $7.87 / 420,398,446 tok 与本地 26 个有账会话的累计值**逐位相等（26/26）**。所以它不能按上面的"相交就整路拒收"处理（那会把代理没记的会话一起丢掉），也不能整份并（那是把同一笔账数两遍）。收口办法：`fetch_dsh(start, have_sids)` 只补 **CC Switch 一行都没有**的会话；本机因此这一路贡献 0，DSH 的量全部以代理库自己的行为真值 —— V8 段同时断言"收口后不再含已记会话"与"HUD 的 DSH 应用行 == 原始 SQL 逐位一致"，另在合成视图里抹掉重叠会话来量并入守恒算术。
 
 ### credits 与成本：只有部分源给得出
 
-- **成本(美元)**：只有 CC Switch 代理行与 cc-haha 有。其余各路本机都不记钱 → 记 0，面板说明行写明"本机不记钱"。
+- **成本(美元)**：只有 CC Switch 代理行与 cc-haha 有。其余各路本机都不记钱 → 记 0。这句声明挂在**底栏**（`foot.m`，`... · 额外源无本机定价`），不挂在应用卡的状态行上：状态行的真实余量只有"锚点 - 标题右沿 - 8"（宽版实测 248px），三个声明拼进去会被省略号截成 `额外…`，等于声明写了但用户看不到 —— V6 段现在同时断言"底栏有这句"与"状态行不含 `…`"。
 - **credits**：Qoder 系与 **WorkBuddy 国内版**给得出（后者逐调用 `credit`，实测覆盖 96.2%、合计 678.64 分，与 `workbuddy.db::session_usage.credit_json` 同源）。
 - **WorkBuddy 国外版故意不并 credits**：1182 条里只有 20 条带值（合计 647.55，均值 32.4/次），而它自己的 `workbuddy.db` 只记到 103.68 —— 两本账差 5 倍，说明这一版本机没有可信积分基线。Y 段用断言把"HUD 并进去的必须是 0"钉死，同时打印出原始 647.55 证明这个 0 是**有意不并**而不是漏读。
 
@@ -155,8 +163,8 @@ hud-state.json      运行时用户偏好（已 gitignore，不入库）
 | S | 四范围 × 14 项口径守恒（防"并了一半"） |
 | T | 电源真实参数（假 subprocess 调真函数）、定时跨重启续用、**坏状态文件不许让程序起不来**、托盘事件合并、位图引用存活、文案与取数对齐 |
 | U | Qoder 路：解析可复现、会话不相交、"token 恒 0"哨兵、缺目录不崩 |
-| V | ZCode / 牧羊人 / Codex 漏项 / Qoder CN 的口径与双计 |
-| W | 今日档小时条形：八路逐小时守恒、画法切换、悬停、无残留图元 |
+| V | ZCode / 牧羊人 / Codex 漏项 / Qoder CN 的口径与双计；**V8 第九路 DSH**：独立 glob 基线逐位对账、归日与 `createdAt` 一致、四视图守恒、**按 `have_sids` 收口**（代理已记的会话不补）、应用行 == 原始 SQL、缺目录降级不影响其它八路 |
+| W | 今日档小时条形：九路逐小时守恒、画法切换、悬停、无残留图元 |
 | X | 跟随启停：启动文件夹解析、判定真值表 8 组、退出标记联动 |
 | Z | 面板落位：展开大面板落在工作区正中（像素级）、拖完刷新不回弹、收起回到圆球右上角（向左下扩展）、点圆球一定映射出来且带 `WS_EX_TOPMOST` |
 | Y | WorkBuddy 两版：独立 `os.walk` 基线对账、**缓存拆桶不多不少**（净输入+命中+写 == Σprompt、四桶 == 应用自记 `total_tokens`）、每路四视图齐并、积分只认国内版（国外版硬断言并 0）、人造相交整路拒绝、缺目录降级、横幅 8 个槽位无空值 |
@@ -173,6 +181,9 @@ hud-state.json      运行时用户偏好（已 gitignore，不入库）
 8. **WorkBuddy 数据目录写死为 `~\.workbuddy` / `~\.workbuddy-ai`**：这两个名字来自各自安装目录 `resources/app.asar.unpacked/cli/product.json` 的 `dataFolderName`（实测国内版 endpoint=workbuddy.cn / 国外版 =workbuddy.ai）。厂商改名或用户搬走配置目录时，这一路会**静默缺席**——cc-haha 那一路做了多盘自动发现，WorkBuddy 没有。
 9. **WorkBuddy 只读 jsonl，不读它的 `workbuddy.db`**：逐调用账只在 `projects/**/*.jsonl`；`workbuddy.db::session_usage` 只有会话级 `used/size/credit_json`。实测两版"最新 jsonl 的 mtime == `session_usage` 最大 `updated_at`"（国内 09-19 15:17 / 国外 10-14 16:56），所以 jsonl 不是被 sqlite 取代的旧账，只是用户真的停了。若哪天某版只写 db 不写 jsonl，本路会停在最后一天而不报错。
 10. **WorkBuddy 的缓存命中率极高（国内 98.46% / 国外 97.31%），会拉动全局命中率**：并入后 7 天档命中率 97.00%、全部档 86.40%。这不是 bug（各源如实报它自己的四项），但读数时要知道它已经不只是 CC Switch 那一路的命中率了。
+11. **DSH 的小时归属是近似的**：会话 json 只有 `createdAt`（会话创建时刻），没有逐请求时间戳，所以 116 轮全记到"创建那一天的那一个钟点"，小时视图与"近 1 小时"对 DSH 只能算占位。且本机 DSH 全被代理记过，这一路在界面上**就是应用表里的 `DSH` 行**（不是独立横幅）；应用表只有 3 个应用槽位按成本排序，今日档 DSH 没有行时就看不见 —— V8 第 8 项因此把检查钉在「全部」档。
+12. **卡片 `.rt` 状态行的宽度预算原来是写死的启发式**（`cardw - 74*s`）：宽版应用卡真实余量是"锚点(卡右沿-11) - 标题右沿 - 8"= **248px**，而启发式给了 281px —— 多算的 33px 就是文字压到标题上的量。现在 `prov.rt` 改按真实几何取预算（取两者较小），并带"长写法→短写法→整条不写"的降级梯子。仍留的口子：句子用的是精确数字，**总请求数进到 7 位数时基础句本身就会超 248px** 而被截断；届时应改用 `big()` 缩写或拆成两行，不要靠梯子硬扛。其它卡片的 `.rt` 还是统一减 74。
+13. **`verify.py` 的 I 段悬停判据依赖"当前没有拖动"**：真鼠标在测试期间落到窗口上会设起 `self._drag`，而松开点在窗外时清不掉，`_hover` 第一句就早退 —— 原来表现为 `AttributeError: 'HUD' object has no attribute '_tip_lab'`，看着像产品坏了。现在段内显式回到 `_drag=None` 的前置态并带可读断言；根因（真实指针事件干扰测试）未消除，跑测试时不要动鼠标。
 
 ## 📄 许可证
 

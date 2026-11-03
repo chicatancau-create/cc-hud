@@ -484,17 +484,29 @@ if not p:
     print('  7 天范围没有可悬停的数据点 —— 悬停测试跳过, 不算通过')
 else:
     days, x0, yt, step, H, pad, mt, mc = p
-    h._hover(_E(x0 + step * 2, yt + 10, 1900, 300))
-    h.root.update()
-    tip = h._tip_lab.cget('text')
-    print('  悬停第3天 -> 读数框映射 %s · 十字线 %s' % (int(h._tipw.winfo_ismapped()),
-                                                  h.cv.itemcget(h.xhair, 'state')))
-    print('    内容: %s' % tip.replace(chr(10), ' / '))
-    print('    首行日期 == 库里那天: %s (期望 1)' % int(tip.split(chr(10))[0].startswith(days[2][0])))
-    h._hover(_E(x0 + step * 2, yt + H + 60))     # 移出绘图区
-    h.root.update()
-    print('  移出图区 -> 读数框收起 %s · 十字线 %s (期望 1 / hidden)'
-          % (int(not h._tipw.winfo_ismapped()), h.cv.itemcget(h.xhair, 'state')))
+    if len(days) < 3:
+        print('  7 天范围只有 %d 个数据点, 取不到"第 3 天" —— 悬停测试跳过, 不算通过' % len(days))
+    else:
+        # 前面段落里若有真鼠标事件落在窗口上, `_on_press` 会把 `_drag` 设起来而松开点在窗外时
+        # 清不掉; `_hover` 第一句就因它早退 -> 读数框根本没被创建, 报成 AttributeError 像是产品坏了。
+        # 所以这里显式回到"无拖动"这一被测前置状态(本机实测: 清掉后四个范围都能正常浮出读数)。
+        h._drag = None
+        h._hover(_E(x0 + step * 2, yt + 10, 1900, 300))
+        h.root.update()
+        assert hasattr(h, '_tip_lab'), \
+            '悬停没造出读数框: _drag=%r expanded=%r _barm=%r days=%d' % (
+                h._drag, h.expanded, getattr(h, '_barm', None), len(days))
+        tip = h._tip_lab.cget('text')
+        print('  悬停第3天 -> 读数框映射 %s · 十字线 %s' % (int(h._tipw.winfo_ismapped()),
+                                                      h.cv.itemcget(h.xhair, 'state')))
+        print('    内容: %s' % tip.replace(chr(10), ' / '))
+        print('    首行日期 == 库里那天: %s (期望 1)' % int(tip.split(chr(10))[0].startswith(days[2][0])))
+        assert tip.split(chr(10))[0].startswith(days[2][0])
+        h._hover(_E(x0 + step * 2, yt + H + 60))     # 移出绘图区
+        h.root.update()
+        assert not h._tipw.winfo_ismapped(), '移出绘图区后读数框还挂着'
+        print('  移出图区 -> 读数框收起 %s · 十字线 %s (期望 1 / hidden)'
+              % (int(not h._tipw.winfo_ismapped()), h.cv.itemcget(h.xhair, 'state')))
 
 print('=== J. 定时操作: 到点执行 / 倒计时显示 / 取消 (电源动作打桩, 不碰真机) ===')
 ran = []
@@ -1016,14 +1028,21 @@ def _wb_base(start, projects, with_credit):
     return n, 0.0, tk, cr, tt, psum, osum
 
 
-def _dsh_base(start):
+def _dsh_base(start, have_sids=None):
     """DSH 的**独立**基线: 自己 glob + json.load 一遍, 不借道 fetch_dsh。
     返回 (轮次数, 成本恒 0, 四桶相加, {日: [轮次, in, out, rd, cc]}, {模型: [轮次, in+out]})。
-    只算 createdAt 归日 >= start 且四项非零的会话(空会话不计请求数)。"""
+    只算 createdAt 归日 >= start 且四项非零的会话(空会话不计请求数)。
+    `have_sids` 传进来时, **CC Switch 已有该会话的行就跳过** —— 与 fetch_dsh 同一套"宁少不双计"。
+    不传(或传空集)是故意的: 归日/模型/小时那些判据要拿全量才量得动, 只有"该不该并"这条
+    才需要按 have_sids 收口。"""
+    if have_sids is None:
+        have_sids = frozenset()
     n = tk = 0
     days, models = {}, {}
     d0 = time.strftime('%Y-%m-%d', time.localtime(start)) if start else '0000-01-01'
     for p in sorted(glob.glob(os.path.join(m.DSH_DIR, '*.json'))):
+        if os.path.basename(p)[:-5] in have_sids:
+            continue
         try:
             with open(p, encoding='utf-8', errors='replace') as fh:
                 j = json.load(fh)
@@ -1057,6 +1076,17 @@ def _dsh_base(start):
     return n, 0.0, tk, days, models
 
 
+def _dsh_have():
+    """CC Switch 里出现过的会话 id(独立一条 SQL, 不读 HUD 的 all_sids)。
+    DSH 本机是**走代理**的: 库里 app_type='dsh' 的行与本地会话累计值逐位相等, 所以这些会话
+    不该再被本地账加第二遍 —— 基线必须按同一套收口, 否则这条对账是假红(净 tok 正好翻倍)。"""
+    c = m.sqlite3.connect('file:' + m.DB.replace(os.sep, '/') + '?mode=ro', uri=True)
+    s = {r[0] for r in c.execute('select distinct session_id from proxy_request_logs'
+                                 ' where session_id is not null')}
+    c.close()
+    return s
+
+
 EXTRA_BASE = {                      # (app, 独立取数)
     'zcode': lambda: (lambda c: (lambda r: (r[0], 0.0, r[1]))(c.execute(
         "select count(*), coalesce(sum(input_tokens+output_tokens+reasoning_tokens"
@@ -1072,8 +1102,8 @@ EXTRA_BASE = {                      # (app, 独立取数)
     # 所以这条对账同时管住了"缓存少减/多减"这一类错(实测少减写缓存会多算 29 万/34 万)。
     'workbuddy': lambda: _wb_base(st, m.WB_SOURCES[0][0], True)[:3],
     'workbuddy-ai': lambda: _wb_base(st, m.WB_SOURCES[1][0], False)[:3],
-    # 第九路 DSH: 同样是"并进所有视图"的源, 基线自己读一遍 json, 不借道 fetch_dsh
-    'dsh': lambda: _dsh_base(st)[:3],
+    # 第九路 DSH: 基线自己读一遍 json(不借道 fetch_dsh), 并按 CC Switch 已有的会话 id 收口
+    'dsh': lambda: _dsh_base(st, _dsh_have())[:3],
 }
 for app, fn in EXTRA_BASE.items():
     try:
@@ -1851,7 +1881,14 @@ qv = txt.get('qoder.v', '')
 print('  横幅明细行 %r' % qv)
 for nm in ('ZCode', 'Qoder CN', '牧羊人', 'Codex未回填'):
     assert nm in prov or nm in qv, '%s 既不在应用表也不在横幅 = 并进来却看不见' % nm
-assert '无本机定价' in txt.get('prov.rt', ''), '额外源不记钱这件事必须写在状态行上'
+foot = txt.get('foot.m', '')
+print('  底栏 %r' % foot)
+# 「额外源无本机定价」挂在底栏(整条宽都是它的余量), 不再挤在应用卡那 256px 里 ——
+# 挤在那儿会被省略号截成「额外…」, 等于声明写了但用户看不到。
+assert '无本机定价' in foot, '额外源不记钱这件事没写在任何看得见的地方: %r' % foot
+assert '无本机定价' not in txt.get('prov.rt', ''), '同一声明在状态行和底栏各写一遍'
+# 状态行不许被省略号截断: 出现「…」就说明又有声明往这行里挤
+assert '…' not in txt.get('prov.rt', ''), 'prov.rt 被省略号截断了(声明丢失): %r' % txt.get('prov.rt')
 # V7 源文件缺失: 整路缺席但数字与界面都不坏
 bak = (m.ZCODE_DB, m.HERD_LOG, m.CODEX_DIRS)
 m.ZCODE_DB = os.path.join(tempfile.gettempdir(), 'no-zcode.sqlite')
@@ -1884,7 +1921,9 @@ def _cpv(b):
     return c
 
 
-dsh = m.fetch_dsh(0)
+# 取数本身的判据(归日/模型/小时/四桶)要拿**全量**才量得动, 所以这里 have_sids 传空集;
+# "该不该并"是另一条判据, 放在第 6 项按真实的 CC Switch 会话 id 单独验。
+dsh = m.fetch_dsh(0, set())
 assert dsh is not None, '本机 %s 读不到任何 DSH 会话, 这一段无从验起' % m.DSH_DIR
 nD, _cD, tkD, daysD, modelsD = _dsh_base(0)
 bdD = dsh['by_day']
@@ -1957,11 +1996,18 @@ print('    Σ小时 %s = 总轮次 %s · Σhtok token %s = 四桶 %s (记到创�
       % (f"{sum(dsh['hourly']):,}", f"{dsh['reqs']:,}",
          f"{sum(r[2] for r in htD):,}", f"{tkD:,}"))
 # 5 并入总账守恒: reqs / real 的增量 == DSH 自己的值, 且各视图仍然互相对平
-dD = _cpv(h._read(st))
+#   用**全部档**而不是当前范围: DSH 只有会话创建日, 本机最近一批创建在 6 天之前,
+#   拿 7 天/今日档去并要求"仍有量"会因用户几天没用 DSH 而假红。
+#   本机这 26 个 DSH 会话**全部**已被 CC Switch 记过(6 段实测), 直接把未收口的账并到真快照上,
+#   merge_extra 的会话 id 闸门会整路拒收 -> 增量恒为 0, 并入算术根本量不到。所以这里先抹掉
+#   all_sids 里这批 id, 等价于"一台 DSH 没走代理的机器", 守恒照样钉死。
+dD = _cpv(h._read(0))
+nDs = m.fetch_dsh(0, set())
+assert nDs is not None, '全部档下 DSH 应当有量(本地一个会话文件都读不到?)'
+dD['all_sids'] = dD['all_sids'] - nDs['sids']
 b0 = (dD['reqs'], dD['real'], dD['cost'])
-nDs = m.fetch_dsh(st)
-assert nDs is not None, '范围档下 DSH 应当仍有量'
 m.merge_extra(dD, nDs)
+assert not dD['extra']['dsh'].get('clash'), '抹掉重叠会话后仍被判双计 -> 闸门判据写错了'
 assert dD['reqs'] == b0[0] + nDs['reqs'], '并入后请求数增量 != DSH 的轮次'
 assert abs(dD['real'] - (b0[1] + nDs['in'] + nDs['out'] + nDs['rd'] + nDs['cc'])) < 1, \
     '并入后真实消耗增量 != DSH 四桶'
@@ -1970,19 +2016,48 @@ assert sum(a[1] for a in dD['apps']) == dD['reqs'] == sum(r[3] for r in dD['dail
     == sum(dD['hourly']) == sum(b['reqs'] for b in dD['htok']), \
     'DSH 并进来之后总账不再自洽(应用/按天/小时/htok 有一处没并齐)'
 assert abs(sum(r[2] for r in dD['daily']) - dD['real']) < 1, 'DSH 并进来之后按天净 tok 与总量脱节'
-print('    并入守恒: 请求 %s + %s = %s (=Σ应用=Σ按天=Σ小时=Σhtok) · 净tok %s + %s = %s · 成本未变 %s'
+print('    并入守恒(全部档·合成视图抹掉重叠会话=一台没走代理的机器): 请求 %s + %s = %s '
+      '(=Σ应用=Σ按天=Σ小时=Σhtok) · 净tok %s + %s = %s · 成本未变 %s'
       % (f"{b0[0]:,}", f"{nDs['reqs']:,}", f"{dD['reqs']:,}",
          f"{int(b0[1]):,}", f"{nDs['in'] + nDs['out'] + nDs['rd'] + nDs['cc']:,}",
          f"{int(dD['real']):,}", int(abs(dD['cost'] - b0[2]) < 1e-9)))
-# 6 双计保险: DSH 的会话 uuid 一旦出现在 CC Switch 里就整路拒绝并入(与其它额外源同一套)
-baseD = h._read(st)
-assert not (dsh['sids'] & set(baseD['all_sids'])), 'DSH 会话 id 与 CC Switch 相交 -> 会双计'
+# 6 双计闸门: 本机 DSH **是走 CC Switch 代理的** —— 实测库里 app_type='dsh' 有 3020 行 /
+#    $7.87 / 420,398,446 tok, 与本地 26 个有账会话的累计值逐位相等(26/26)。所以这一路必须按
+#    have_sids 收口, 只补"代理一行都没有"的会话; 整份并进来等于把同一笔账数两遍。
+haveD = _dsh_have()
+interD = dsh['sids'] & haveD
+gapD = m.fetch_dsh(0, haveD)
+assert interD, '本机 DSH 与 CC Switch 完全不相交? 那 have_sids 这条收口判据失去意义, 要重看'
+assert gapD is None or not (gapD['sids'] & haveD), '收口后仍并进了代理已记的会话 -> 双计'
+dNow = h._read(0)
+if gapD is None:
+    assert 'dsh' not in (dNow.get('extra') or {}), \
+        '代理已覆盖全部 DSH 会话, extra 里却还留着这一路: %s' % sorted((dNow.get('extra') or {}))
+else:
+    _eD = (dNow.get('extra') or {}).get('dsh')
+    assert _eD and _eD['reqs'] == gapD['reqs'], \
+        '待补的 %s 次会话没落到 extra(或落错了): %s' % (gapD['reqs'], _eD and _eD['reqs'])
+rawD = m.sqlite3.connect('file:' + m.DB.replace(os.sep, '/') + '?mode=ro', uri=True)
+# NETK 自己就是 sum(...) 的完整表达式(还减掉 codex_session 的重复缓存读), 不能再套一层 sum()
+sqD = rawD.execute("select count(*), coalesce(sum(total_cost_usd),0), " + NETK
+                   + " from proxy_request_logs where app_type='dsh'").fetchone()
+rawD.close()
+apD = {a[0]: a for a in dNow['apps']}.get('dsh')
+assert apD, '应用表里没有 DSH 行 = 这一路在界面上消失了'
+assert apD[1] == sqD[0] and abs(apD[2] - sqD[1]) < 0.005 and apD[3] == sqD[2], \
+    'DSH 应用行不等于代理库真值(被本地账加了一遍?): HUD %s vs SQL %s' % (apD[1:4], sqD)
+print('    双计闸门: 本地有账会话 %d 个, 代理已记 %d 个 -> 待补 %s · 应用行 %s 次/$%.2f/%s tok '
+      '与 SQL 逐位一致'
+      % (len(dsh['sids']), len(interD), '0 个(整路不并)' if gapD is None else f"{gapD['reqs']} 次",
+         f"{apD[1]:,}", apD[2], f"{apD[3]:,}"))
+# 6b 收口之后, merge_extra 那层的双计保险仍要在位(哪天出现"只记了一半会话"的机器要靠它兜)
+baseD = h._read(0)
 dC2 = _cpv(baseD)
 m.merge_extra(dC2, dict(dsh, sids=dsh['sids'] | {next(iter(baseD['all_sids']))}))
 assert dC2['reqs'] == baseD['reqs'] and dC2['extra']['dsh'].get('clash'), \
     '人造会话 id 相交后 DSH 没被拒绝并入'
-print('    双计保险: 与 CC Switch %d 个会话 id 不相交 · 人造相交后整路拒绝(请求 %s 未变)'
-      % (len(baseD['all_sids']), f"{dC2['reqs']:,}"))
+print('    双计保险(merge_extra 层): 整路 %s 个会话 id 与代理已记的 %d 个相交 -> 拒绝并入(请求 %s 未变)'
+      % (len(dsh['sids']), len(baseD['all_sids'] & dsh['sids']), f"{dC2['reqs']:,}"))
 # 7 缺目录: 整路缺席、返回 None、不崩、不碰任何数, 也不影响其它八路
 real_dsh_dir = m.DSH_DIR
 m.DSH_DIR = os.path.join(tempfile.gettempdir(), 'no-such-dsh-dir')
@@ -2006,12 +2081,24 @@ finally:
 h.refresh(True)
 h.root.update()
 # 8 面板上看得见: 应用表或横幅明细里必须出现 DSH(并进来却看不见 = 用户视角没有这一路)
+#   这一路在界面上就是**代理库里 app_type='dsh' 的那一行**(见 6 段的收口), 而应用表只有 3 个
+#   应用槽位, 按成本排序 —— 今日档只有 2 个应用有行, dsh 今天 0 行就进不了表。所以检查落点前
+#   先把范围钉到「全部」档(那里 dsh 稳定排第 3, 实测 $7.87/3020 次), 量完再还回去。
+_ridgeD = h.range_i
+h.range_i = 3
+h.refresh(True)
+h.root.update()
 txtD = {k: h.cv.itemcget(t, 'text') for k, t in h.ids.items()
         if isinstance(t, int) and h.cv.type(t) == 'text'}
 provD = ' '.join(v for k, v in txtD.items() if k.startswith('prov.n'))
 qvD = txtD.get('qoder.v', '')
-assert 'DSH' in provD or 'DSH' in qvD, 'DSH 既不在应用表也不在横幅 = 并进来却看不见'
-print('    面板可见: 应用表 %s · 横幅 %s' % ('DSH' in provD, 'DSH' in qvD))
+assert 'DSH' in provD or 'DSH' in qvD, \
+    'DSH 既不在应用表也不在横幅 = 并进来却看不见(全部档槽位 %r)' % provD
+h.range_i = _ridgeD
+h.refresh(True)
+h.root.update()
+print('    面板可见(全部档): 应用表 %s · 横幅 %s · 槽位 %r'
+      % ('DSH' in provD, 'DSH' in qvD, provD[:60]))
 # 快照是临时产物, 不许留在 %TEMP% 里(与 T7 导出判据同一套收尾纪律)
 m.DSH_DIR = _REAL_DSH_DIR
 try:

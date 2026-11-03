@@ -1148,14 +1148,20 @@ def fetch_workbuddy(start, projects, key, with_credit):
     return z
 
 
-def fetch_dsh(start):
+def fetch_dsh(start, have_sids=frozenset()):
     """DSH(DeepSeek Harness)的会话用量: `~/.dsh/storages/session_projcache/sessions/*.json`
     每个会话一份 `record.rows.tokenUsage.val.totals` 累计值, 上游**没有逐次调用的时间戳**
     —— 所以只能按 `record.identity.createdAt`(会话创建时刻)归日, 小时也只能记到那个钟点上,
     **归属是近似的**(与 fetch_codex_gap 同一套口径: 一个会话可能跨了几小时, 全记在创建那一小时)。
     不把累计值平均摊到多个小时 —— 那是编的; 记到唯一已知的那个时刻并标注近似, 是可核对的事实。
 
-    口径(实测 32 个会话文件, 其中 7 个一条 token 都没有 -> 空会话跳过, 不占请求数):
+    **只补 CC Switch 一行都没有的那些会话**(`have_sids`): 实测本机 DSH 是**走 CC Switch 代理**的
+    —— 库里 `app_type='dsh'` 有 3020 行 / $7.87 / 420,398,446 tok, 而本地 26 个有账会话的累计值
+    与之**逐位相等(26/26)**, 另外 8 个会话四项全 0。所以整份并进来就是把同一笔账数两遍
+    (verify N 段实测: 净 tok 会正好翻倍成 840,796,892)。与 codex 漏项同一套处理:
+    有行的会话一律不碰, 宁少不双计; 哪天 DSH 不再走代理, 这些会话才会真正补进来。
+
+    口径(实测 34 个会话文件, 其中 8 个一条 token 都没有 -> 空会话跳过, 不占请求数):
       `uncachedInputTokens` 就是**不含缓存读**的新增输入(与 codex 回填那种"input 含缓存读"
       不是一回事), 所以四项直接相加 = 真实消耗, 不需要再减任何一项;
       `cacheWriteTokens` 本机全部为 0 —— 那是上游没记, 不是这里漏读。
@@ -1175,6 +1181,9 @@ def fetch_dsh(start):
     h1 = last = 0
     now = time.time()
     for path in sorted(glob.glob(os.path.join(DSH_DIR, '*.json'))):
+        sid = os.path.basename(path)[:-5]
+        if sid in have_sids:
+            continue                    # CC Switch 已记过这个会话 -> 再并就是双计
         try:
             with open(path, encoding='utf-8', errors='replace') as fh:
                 j = json.load(fh)
@@ -1223,8 +1232,8 @@ def fetch_dsh(start):
     if not by_day:
         return None
     z = _src('dsh', 'DSH', 'dsh', by_day, sids, hourly, h1, int(last),
-             models, 'DSH 会话累计 · 只有会话创建时刻, 小时归属是近似的 · '
-                     '缓存写为 0 是上游未记 · 不记钱')
+             models, 'DSH 会话累计 · 只补 CC Switch 零行的会话 · '
+                     '只有会话创建时刻, 小时归属是近似的 · 缓存写为 0 是上游未记 · 不记钱')
     z['htok'] = htok
     return z
 
