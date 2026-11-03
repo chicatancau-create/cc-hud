@@ -2172,8 +2172,10 @@ print('  今日 24 格里 %d 格有请求 · 全零格不画柱(有请求但无 
       % sum(1 for v in zero if v))
 assert h.cv.find_withtag('fatal') == ()
 
-print('=== X. 跟随启停: 开机只判定一回 + CC Switch 退出则跟着退出 ===')
-# X1 启动文件夹里不该再有"直接启动 HUD"的快捷方式, 只该有判定器
+print('=== X. 跟随启停: 手动启动(不自启) + CC Switch 退出则跟着退出 ===')
+# X1 启动文件夹里**什么都不该有**: 用户 2026-11-03 点名「不再开机自启, 以后我自己启动,
+#     不要留一个进程霸占空间」, 所以判定器(follow-probe.pyw)的快捷方式也撤掉了。
+#     HUD 本体仍然不许出现在自启名单里(那是更早的一条: 开机直接弹卡片=流氓)。
 #     .lnk 用 Python 直接解: 目标路径与参数是文件里的 UTF-16LE 串, 不依赖 PowerShell 的递归
 startup = os.path.join(os.environ['APPDATA'], 'Microsoft', 'Windows', 'Start Menu',
                        'Programs', 'Startup')
@@ -2190,12 +2192,10 @@ lnks = {f: lnk_text(os.path.join(startup, f)) for f in os.listdir(startup)
         if f.lower().endswith('.lnk')}
 hud_direct = sorted(f for f, t in lnks.items() if 'cc-hud.pyw' in t)
 probe_lnk = sorted(f for f, t in lnks.items() if 'follow-probe.pyw' in t)
-print('  启动文件夹共 %d 个快捷方式 · 指向 HUD 本体 %s · 指向判定器 %s (期望 0 个 / 1 个)'
+print('  启动文件夹共 %d 个快捷方式 · 指向 HUD 本体 %s · 指向判定器 %s (期望 0 个 / 0 个)'
       % (len(lnks), hud_direct, probe_lnk))
-for f in probe_lnk:
-    print('    %s -> %s' % (f, lnks[f][:150]))
 assert not hud_direct, 'HUD 还在开机自启名单里: %s' % hud_direct
-assert len(probe_lnk) == 1, '判定器的快捷方式没装对: %s' % list(lnks)
+assert not probe_lnk, '开机自启已按用户要求取消, 判定器的快捷方式还在名单里: %s' % probe_lnk
 
 # X2 判定函数的完整真值表(只判定一回 = 纯函数, 不轮询不常驻)
 from importlib.machinery import SourceFileLoader as _SFL
