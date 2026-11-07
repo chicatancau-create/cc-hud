@@ -11,7 +11,7 @@ Windows 桌面的 CC Switch 用量悬浮统计 HUD：tkinter 自绘面板（主�
 - **双计保险**：每一路都按会话 id 与 CC Switch 求交集，一旦相交**整路拒绝并入**，宁可少计不双计
 - **面板落位**：点圆球 → 小面板一定浮到最前，并沿圆球**向左下方**展开（面板右上角钉在圆球右上角）；点「展开大面板」→ 大面板落在**工作区正中**（让开任务栏）。居中只管"小→大那一次切换"，之后随便拖，刷新不会把它拽回去（`verify.py` Z 段逐条量像素）
 - **今日档按小时条形图**：范围内只有一天时画不出跨天曲线，改为 24 根柱（柱=净 token，折线=成本）
-- **不装开机自启，手动启动**（2026-11-03 按用户点名取消）：桌面上不留常驻进程。启动方式是快捷方式 `E:\DeskBox\编程工具\CC Switch HUD.lnk`（或 `start-hud.bat` / `pythonw cc-hud.pyw`）。**CC Switch 退出 → HUD 跟着退出**（唯一例外：定时电源还挂着时只隐藏，留撤销口）；反过来 CC Switch 重新启动**不会**自动拉起 HUD，需要自己点一下快捷方式。
+- **不装开机自启，手动启动**（2026-11-07 按用户点名取消）：桌面上不留常驻进程。启动方式是快捷方式 `E:\DeskBox\编程工具\CC Switch HUD.lnk`（或 `start-hud.bat` / `pythonw cc-hud.pyw`）。**CC Switch 退出 → HUD 跟着退出**（唯一例外：定时电源还挂着时只隐藏，留撤销口）；反过来 CC Switch 重新启动**不会**自动拉起 HUD，需要自己点一下快捷方式。
 - **定时电源**：到点关屏/睡眠/休眠/注销/重启/关机，带可撤销的系统级宽限，且跨 HUD 重启续用
 
 ## 🖥️ 演示
@@ -74,7 +74,7 @@ hud-state.json      运行时用户偏好（已 gitignore，不入库）
                     前后对照截图）。已 gitignore，只作历史证据，不参与构建。
 ```
 
-启动入口（**不装开机自启**，2026-11-03 用户点名取消）：快捷方式 `E:\DeskBox\编程工具\CC Switch HUD.lnk` → `pythonw.exe "G:\cc-hud\cc-hud.pyw"`（隐藏窗口、带上面这个 ico）。也可以直接跑 `start-hud.bat` 或 `pythonw cc-hud.pyw`。程序有命名互斥体闸门，重复点击不会再叠一张卡片；CC Switch 退出时 HUD 跟着退出，之后重新打开 CC Switch **不会**自动拉起，需要自己点一下。
+启动入口（**不装开机自启**，2026-11-07 用户点名取消）：快捷方式 `E:\DeskBox\编程工具\CC Switch HUD.lnk` → `pythonw.exe "G:\cc-hud\cc-hud.pyw"`（隐藏窗口、带上面这个 ico）。也可以直接跑 `start-hud.bat` 或 `pythonw cc-hud.pyw`。程序有命名互斥体闸门，重复点击不会再叠一张卡片；CC Switch 退出时 HUD 跟着退出，之后重新打开 CC Switch **不会**自动拉起，需要自己点一下。
 
 ## 🔌 数据源与口径
 

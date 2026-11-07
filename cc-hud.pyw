@@ -25,7 +25,7 @@ r"""CC Switch 悬浮统计 HUD · 只读两份库 (mode=ro): %USERPROFILE%\.cc-s
 providers.json —— 那三处存明文 API key。两份库一律 mode=ro。
 刷新只就地改文字/坐标/颜色, 不销毁重建 -> 无闪烁。
 
-启动机制: **不再装开机自启**(2026-11-03 用户点名: 不要留常驻进程占空间, 以后自己启动)。
+启动机制: **不再装开机自启**(2026-11-07 用户点名: 不要留常驻进程占空间, 以后自己启动)。
 启动方式是快捷方式(E:\DeskBox\编程工具\CC Switch HUD.lnk)/start-hud.bat/pythonw cc-hud.pyw。
 follow-probe.pyw 那套"开机判定一回"的代码与判据都还留着, 但它的快捷方式已从启动文件夹撤掉
 (送进回收站, 原位置可查), 要恢复自启把它放回 Startup 即可。
