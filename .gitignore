@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 hud-state.json
 *.tmp
+历史会话/

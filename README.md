@@ -70,9 +70,11 @@ shot.py             三条版式 + 镂空对照的 PrintWindow 实拍取证
 start-hud.bat       手动启动入口（钉死 D:\PyCharm\Python\pythonw.exe，先自检 tkinter/Pillow 再 start）
 cc-hud.ico          桌面快捷方式的图标（7 帧 16–256px，全部无压缩 BMP 帧）
 hud-state.json      运行时用户偏好（已 gitignore，不入库）
+历史会话/           2026-11-07 从 AI 任务区(G:\AIrenwu)随项目搬来的旧会话档案（UI 优化轮次记录与
+                    前后对照截图）。已 gitignore，只作历史证据，不参与构建。
 ```
 
-桌面入口：`%USERPROFILE%\Desktop\CC Switch HUD.lnk` → `pythonw.exe "G:\AIrenwu\cc-hud\cc-hud.pyw"`（隐藏窗口、带上面这个 ico）。程序本身有命名互斥体闸门，重复点击不会再叠一张卡片。
+启动入口（**不装开机自启**，2026-11-03 用户点名取消）：快捷方式 `E:\DeskBox\编程工具\CC Switch HUD.lnk` → `pythonw.exe "G:\cc-hud\cc-hud.pyw"`（隐藏窗口、带上面这个 ico）。也可以直接跑 `start-hud.bat` 或 `pythonw cc-hud.pyw`。程序有命名互斥体闸门，重复点击不会再叠一张卡片；CC Switch 退出时 HUD 跟着退出，之后重新打开 CC Switch **不会**自动拉起，需要自己点一下。
 
 ## 🔌 数据源与口径
 

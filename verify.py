@@ -6,8 +6,9 @@ import glob, json, os, subprocess, sys, tempfile, time
 from importlib.machinery import SourceFileLoader
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-sys.path.insert(0, os.getcwd())
-m = SourceFileLoader('hud', 'cc-hud.pyw').load_module()
+HERE = os.path.dirname(os.path.abspath(__file__))   # 2026-11-07 起本仓库是独立项目 G:\cc-hud,
+sys.path.insert(0, HERE)                             # 判据按自己所在目录算, 以后再搬家不用改代码
+m = SourceFileLoader('hud', os.path.join(HERE, 'cc-hud.pyw')).load_module()
 m._dpi_aware()
 REAL_RUN_POWER = m.run_power        # J 段会把 m.run_power 打桩, T1 要拿真函数验参数
 import tkinter as tk
@@ -1518,7 +1519,7 @@ kid = os.path.join(tempfile.gettempdir(), 'hud_bad_state.py')
 KID = '''import sys, os, tempfile
 sys.path.insert(0, r'__DIR__')
 from importlib.machinery import SourceFileLoader
-m = SourceFileLoader('hud', 'cc-hud.pyw').load_module()
+m = SourceFileLoader('hud', os.path.join(r'__DIR__', 'cc-hud.pyw')).load_module()
 m.STATE = os.path.join(tempfile.gettempdir(), 'hud-state-bad.json')   # 不碰真状态文件
 h = m.HUD()
 h.refresh(True)
@@ -1529,7 +1530,7 @@ print('range=%d alpha=%s pin=%s pmin=%s dl=%s win=%dx%d' % (
 h.root.destroy()
 '''
 with open(kid, 'w', encoding='utf-8') as fh:
-    fh.write(KID.replace('__DIR__', r'G:\AIrenwu\cc-hud'))
+    fh.write(KID.replace('__DIR__', HERE))
 _spy = m.subprocess.Popen          # run() 内部找的是模块全局 Popen, 临时换回真身再调
 m.subprocess.Popen = _op
 try:
@@ -1591,7 +1592,7 @@ kid2 = os.path.join(tempfile.gettempdir(), 'hud_cold_wide.py')
 KID2 = '''import sys, os, tempfile
 sys.path.insert(0, r'__DIR__')
 from importlib.machinery import SourceFileLoader
-m = SourceFileLoader('hud', 'cc-hud.pyw').load_module()
+m = SourceFileLoader('hud', os.path.join(r'__DIR__', 'cc-hud.pyw')).load_module()
 m.STATE = os.path.join(tempfile.gettempdir(), 'hud-state-cold.json')
 m._dpi_aware()
 h = m.HUD()
@@ -1605,7 +1606,7 @@ print('wide=%s win=%dx%d right=%d dotright=%d top=%d' % (
 h.root.destroy()
 '''
 with open(kid2, 'w', encoding='utf-8') as fh:
-    fh.write(KID2.replace('__DIR__', r'G:\AIrenwu\cc-hud').replace('__PEEKN__', str(PEEKN[0])))
+    fh.write(KID2.replace('__DIR__', HERE).replace('__PEEKN__', str(PEEKN[0])))
 _spy = m.subprocess.Popen
 m.subprocess.Popen = _op
 try:
@@ -2199,7 +2200,7 @@ assert not probe_lnk, '开机自启已按用户要求取消, 判定器的快捷�
 
 # X2 判定函数的完整真值表(只判定一回 = 纯函数, 不轮询不常驻)
 from importlib.machinery import SourceFileLoader as _SFL
-probe = _SFL('probe', r'G:\AIrenwu\cc-hud\follow-probe.pyw').load_module()
+probe = _SFL('probe', os.path.join(HERE, 'follow-probe.pyw')).load_module()
 cases = [
     (None, False, None, False),      # CC 没跑 -> 不起
     (None, True, None, False),       # CC 没跑且 HUD 在(不该发生) -> 不起
@@ -2237,7 +2238,7 @@ finally:
 #     子进程实测结果见 %TEMP%/hud_follow_quit.py 的输出; 这里只钉住代码路径不被改坏。
 # 拆分后实现在 cchud/*.py 里: 源码文本判据改成扫「启动器 + 包」全部源码, 判据本身不变
 src4 = ''.join(open(_p, encoding='utf-8').read() for _p in
-               [r'G:\AIrenwu\cc-hud\cc-hud.pyw'] + sorted(glob.glob(r'G:\AIrenwu\cc-hud\cchud\*.py')))
+               [os.path.join(HERE, 'cc-hud.pyw')] + sorted(glob.glob(os.path.join(HERE, 'cchud', '*.py'))))
 assert '暂不跟随退出' in src4 and src4.count('self.quit()') >= 2,     '跟随退出的两条分支(有定时不退 / 无定时退)被改掉了'
 print('  跟随退出分支在位: 定时未清不退 %s · 无定时跟着 quit %s (期望 真 / 真)'
       % (int('暂不跟随退出' in src4), int(src4.count('self.quit()') >= 2)))
