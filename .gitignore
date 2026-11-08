@@ -1,5 +1,15 @@
 __pycache__/
 *.pyc
 hud-state.json
+hud-next-state.json
 *.tmp
 历史会话/
+.venv/
+node_modules/
+web/dist/
+web/playwright-report/
+web/test-results/
+artifacts/
+.webview*/
+.wv-*/
+cc-hud-usage-*.json

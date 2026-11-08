@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>cc-hud dot</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #0b0e14; overflow: hidden; }
+    body { display: flex; align-items: flex-end; justify-content: flex-end; }
+    #dot {
+      width: 34px; height: 34px; border-radius: 50%; cursor: pointer;
+      background: radial-gradient(circle at 35% 30%, #34d399, #10b981 55%, #065f46);
+      box-shadow: inset 0 0 0 2px rgba(255,255,255,.18), 0 2px 8px rgba(0,0,0,.5);
+      display: grid; place-items: center; color: #06251c; font: 700 12px "Segoe UI", sans-serif;
+      user-select: none;
+    }
+    #dot:hover { filter: brightness(1.15); }
+  </style>
+</head>
+<body>
+  <div id="dot" title="打开 cc-hud">cc</div>
+  <script>
+    const open = () => window.pywebview?.api?.window?.("show");
+    document.getElementById("dot").addEventListener("click", open);
+  </script>
+</body>
+</html>
