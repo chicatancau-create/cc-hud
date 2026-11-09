@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from cchud_next.win32 import WindowOps, monitors  # noqa: E402
+from cchud_next.win32 import WindowOps, dpi_aware, monitors  # noqa: E402
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
@@ -78,6 +78,7 @@ def find(title: str) -> int | None:
 
 
 def main() -> int:
+    dpi_aware()          # GetWindowRect/抓图必须是物理像素，否则 125% 下会被虚拟化成 0.8 倍
     if os.environ.get("CC_HUD_STACK"):
         faulthandler.dump_traceback_later(40, repeat=True)
     ap = argparse.ArgumentParser()
@@ -98,11 +99,10 @@ def main() -> int:
     if runtime.exists():
         runtime.unlink()
 
-    sizes = {"card": "530x775", "insights": "2202x1340",
-             "diagnostics": "1600x1100", "settings": "900x980"}
-    size = sizes.get(args.layout, "900x980")
-    env = dict(os.environ, CC_HUD_LAYOUT=args.layout, CC_HUD_SIZE=size,
-               CC_HUD_PROFILE=tempfile.mkdtemp(prefix="cchud-webview-"))
+    # 不设 CC_HUD_SIZE：抓图必须走生产布局尺寸（尺寸由宿主按 DPI 换算）
+    env = dict(os.environ, CC_HUD_LAYOUT=args.layout,
+               CC_HUD_PROFILE=tempfile.mkdtemp(prefix="cchud-webview-"),
+               CC_HUD_MUTEX=f"Local\cc-hud-verify-{os.getpid()}-{args.layout}")
     if args.scroll:
         env["CC_HUD_SCROLL"] = str(args.scroll)
     if args.selftest:
@@ -240,7 +240,7 @@ def main() -> int:
             from PIL import ImageGrab
             rect = wt.RECT()
             user32.GetWindowRect(wt.HWND(hwnd), ctypes.byref(rect))
-            time.sleep(0.4)  # 镂空时保留 LWA_COLORKEY，不能用 alpha 覆盖
+            time.sleep(0.4)  # 镂空态不要再用 alpha 覆盖，保持区域/颜色键
             img = ImageGrab.grab(bbox=(rect.left, rect.top, rect.right, rect.bottom), all_screens=True)
             img.save(shot)
             cap = {"ok": True, "method": "ImageGrab", "w": img.width, "h": img.height,
@@ -252,8 +252,20 @@ def main() -> int:
                 cap["bg_pixels"] = bg
                 cap["area"] = len(px)
                 state = ops.layered_state()
-                check("hollow_colorkey", (state["flags"] & 1) != 0, state)
-                check("hollow_bg_transparent", bg < len(px) * 0.05, f"bg={bg}/{len(px)} inv={inv}")
+                rgn = ops.region_state()
+                # 颜色键会让 WebView2 子窗整窗穿透（按钮点不到），改用圆角窗口区域 + alpha
+                check("hollow_transparent", (state["flags"] & 1) != 0 or rgn in (2, 3),
+                      {"layered": state, "region_type": rgn})
+                # 圆角外四角必须是“窗口后面的画面”，不能是窗口自身的背景色；
+                # 不能用全图同色像素占比——UI 自身的深色（如 10,13,22）会落进容差带造成假阳性。
+                corners = [(2, 2), (img.width - 3, 2), (2, img.height - 3),
+                           (img.width - 3, img.height - 3)]
+                corner_px = [img.getpixel(c) for c in corners]
+                native = [c for c in corner_px
+                          if abs(c[0] - 11) <= 2 and abs(c[1] - 14) <= 2 and abs(c[2] - 20) <= 2]
+                check("hollow_corners_transparent", not native,
+                      {"corners": corner_px, "native_bg_hits": len(native),
+                       "bg_pixels": bg, "inv_pixels": inv})
             if not args.hollow:
                 ops.set_alpha(float(data.get("alpha_setting") or 0.96))
         else:

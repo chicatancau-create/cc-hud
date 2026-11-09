@@ -13,7 +13,7 @@ def test_pywebview_importable():
 
 
 def test_web_dist_contract():
-    assert (ROOT / "web" / "src" / "main.tsx").exists() or True
+    assert (ROOT / "web" / "src" / "main.tsx").exists(), "前端入口缺失"
     assert (ROOT / "web" / "package.json").exists(), "前端脚手架缺失"
 
 

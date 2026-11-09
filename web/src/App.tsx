@@ -73,20 +73,30 @@ function AppInner({ api, mode }: { api: HudApi; mode: "native" | "stub" }) {
     if (!settings) return;
     document.body.dataset.theme = settings.theme;
     document.body.classList.toggle("mode-card", settings.layout === "card");
+    document.body.dataset.layout = settings.layout;
   }, [settings]);
 
   const change = useCallback(async (patch: Partial<Settings>) => {
     const id = ++settingsSeq.current;
+    const prevRange = range;
     if (patch.range) setRange(patch.range);   // 先切范围，再等设置回包
     const run = settingsChain.current.then(() => api.set_settings(patch));
     settingsChain.current = run.catch(() => undefined);   // 串行写，服务端顺序=点击顺序
-    const next = await run;
-    if (id === settingsSeq.current) setSettings(next);   // 只认最后一次设置回包
-    return next;
-  }, [api]);
+    try {
+      const next = await run;
+      if (id === settingsSeq.current) setSettings(next);   // 只认最后一次设置回包
+      return next;
+    } catch (e) {
+      if (patch.range) setRange(prevRange);               // 原生失败：回滚乐观范围
+      if (id === settingsSeq.current) {
+        setNotice(`设置失败：${e instanceof Error ? e.message : String(e)}`);
+      }
+      throw e;
+    }
+  }, [api, range]);
 
   const navigate = useCallback((layout: NavLayout) => {
-    void change({ layout });
+    void change({ layout }).catch(() => undefined);
   }, [change]);
 
   useEffect(() => {
@@ -102,6 +112,44 @@ function AppInner({ api, mode }: { api: HudApi; mode: "native" | "stub" }) {
     }, 600);
     return () => window.clearInterval(t);
   }, []);
+
+  useEffect(() => {
+    if (!boot?.selftest_layout || !snap || !settings) return;
+    const map: Record<string, string> = {
+      expand: "expand-insights", range7: "range-7d", collapse: "collapse-card",
+      diagnostics: "nav-diagnostics", settings: "nav-settings", insights: "nav-insights", card: "nav-card"
+    };
+    let raf = 0;
+    let last = "";
+    const send = () => {
+      const out: Record<string, [number, number]> = {};
+      for (const [key, id] of Object.entries(map)) {
+        const el = document.querySelector(`[data-testid="${id}"]`);
+        if (el) {
+          const r = el.getBoundingClientRect();
+          out[key] = [r.left + r.width / 2, r.top + r.height / 2];
+        }
+      }
+      const payload = JSON.stringify(out);
+      if (Object.keys(out).length && payload !== last) {
+        last = payload;
+        void api.window("layout_targets", payload).catch(() => undefined);
+      }
+    };
+    const schedule = () => {
+      if (raf) return;
+      raf = window.requestAnimationFrame(() => { raf = 0; send(); });
+    };
+    send();
+    // 页内滚动后目标矩形会变，实机验收按真实滚动后重新上报
+    document.addEventListener("scroll", schedule, true);
+    window.addEventListener("resize", schedule);
+    return () => {
+      document.removeEventListener("scroll", schedule, true);
+      window.removeEventListener("resize", schedule);
+      if (raf) window.cancelAnimationFrame(raf);
+    };
+  }, [api, boot, snap, settings]);
 
   useEffect(() => {
     if (!window.location.hash.includes("selftest=power")) return;
@@ -208,7 +256,7 @@ function AppInner({ api, mode }: { api: HudApi; mode: "native" | "stub" }) {
           onNavigate={(l) => navigate(l as NavLayout)} />
       )}
       {layout === "settings" && (
-        <SettingsView settings={settings} onChange={(p) => void change(p)}
+        <SettingsView settings={settings} onChange={(p) => void change(p).catch(() => undefined)}
           onExport={() => void doExport()}
           onPower={(action, confirmed) => api.power(action, confirmed)}
           onCancelPower={() => api.cancel_power()}

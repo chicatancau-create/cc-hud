@@ -35,7 +35,7 @@ export function InsightsView({ snap, range, refreshing, onRange, onRefresh, onEx
         <div className="head-actions">
           <div className="seg" role="group" aria-label="时间范围">
             {RANGES.map((r) => (
-              <button key={r.key} className={range === r.key ? "on" : ""} onClick={() => onRange(r.key)}>
+              <button key={r.key} data-testid={`range-${r.key}`} className={range === r.key ? "on" : ""} onClick={() => onRange(r.key)}>
                 {r.label}
               </button>
             ))}
@@ -44,7 +44,7 @@ export function InsightsView({ snap, range, refreshing, onRange, onRefresh, onEx
             {refreshing ? "刷新中" : "刷新"}
           </button>
           <button className="ghost" onClick={onExport}>导出</button>
-          <button className="ghost" onClick={() => onNavigate("settings")}>设置</button>
+          <button className="ghost" data-testid="nav-settings" onClick={() => onNavigate("settings")}>设置</button>
         </div>
       </header>
 
@@ -105,23 +105,23 @@ export function InsightsView({ snap, range, refreshing, onRange, onRefresh, onEx
       </section>
 
       <section className="tiles">
-        <div className="card tile">
+        <div className="card tile" data-testid="tile-heat">
           <div className="card-head"><h3>活跃热力图</h3><span className="dim">8 周</span></div>
           <Heatmap snap={snap} />
         </div>
-        <div className="card tile wide">
-          <div className="card-head"><h3>模型</h3><span className="dim">按 token</span></div>
-          <ModelsTable snap={snap} />
-        </div>
-        <div className="card tile">
+        <div className="card tile" data-testid="tile-tools">
           <div className="card-head"><h3>工具调用</h3><span className="dim">cc-haha transcript</span></div>
           <ToolsCard snap={snap} />
         </div>
-        <div className="card tile">
+        <div className="card tile wide" data-testid="tile-models">
+          <div className="card-head"><h3>模型</h3><span className="dim">按 token</span></div>
+          <ModelsTable snap={snap} />
+        </div>
+        <div className="card tile" data-testid="tile-timing">
           <div className="card-head"><h3>耗时</h3><span className="dim">代理日志实测</span></div>
           <TimingCard snap={snap} />
         </div>
-        <div className="card tile">
+        <div className="card tile" data-testid="tile-conservation">
           <div className="card-head"><h3>守恒校验</h3><span className="dim">{snap.conservation.length} 项</span></div>
           {snap.conservation.length === 0 ? <div className="empty-note">无校验项</div> : (
             <ul className="checks">
@@ -150,8 +150,8 @@ export function InsightsView({ snap, range, refreshing, onRange, onRefresh, onEx
       </section>
 
       <footer className="page-foot">
-        <button className="ghost" onClick={() => onNavigate("diagnostics")}>打开诊断</button>
-        <button className="ghost" onClick={() => onNavigate("card")}>收起为小卡</button>
+        <button className="ghost" data-testid="nav-diagnostics" onClick={() => onNavigate("diagnostics")}>打开诊断</button>
+        <button className="ghost" data-testid="collapse-card" onClick={() => onNavigate("card")}>收起为小卡</button>
       </footer>
     </div>
   );

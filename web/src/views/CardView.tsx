@@ -39,7 +39,7 @@ export function CardView({ snap, range, refreshing, onRange, onExpand, onSetting
         </div>
         <div className="card-icons">
           <button className="icon" title="设置" aria-label="设置" onClick={onSettings}>⚙</button>
-          <button className="icon" title="展开洞察" aria-label="展开洞察" onClick={onExpand}>⤢</button>
+          <button className="icon" data-testid="expand-insights" title="展开洞察" aria-label="展开洞察" onClick={onExpand}>⤢</button>
         </div>
       </header>
 

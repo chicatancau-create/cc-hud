@@ -158,6 +158,7 @@ export interface Bootstrap {
   platform: string;
   fake_power?: boolean;
   start_date: string | null;
+  selftest_layout?: boolean;
 }
 
 export interface ExportResult {

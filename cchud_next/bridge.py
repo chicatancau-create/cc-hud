@@ -1,6 +1,7 @@
 """桥接层：pywebview js_api 的实现。不启动服务、不监听端口。"""
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
@@ -13,7 +14,7 @@ from .accounting import collect, merge, overall_status
 from .export import write_export
 from .paths import Paths
 from .ranges import RANGE_LABELS, RANGES, start_date
-from .settings import SettingsStore
+from .settings import SettingsStore, validate
 
 SOURCE_META = [
     ("ccswitch", "CC Switch", "proxy"),
@@ -155,6 +156,7 @@ class Bridge:
             "platform": "windows",
             "fake_power": not isinstance(self._power_port, SystemPower),
             "start_date": start_date("1d"),
+            "selftest_layout": os.environ.get("CC_HUD_SELFTEST") == "layout",
         }
 
     def snapshot(self, rng: str = "1d", seq: int = 0) -> dict:
@@ -174,13 +176,12 @@ class Bridge:
         return self._settings_store.load()
 
     def set_settings(self, patch: dict | None = None) -> dict:
-        data = self._settings_store.update(patch or {})
+        """原生应用成功后才落盘；失败保留旧设置并把可读异常抛给前端。"""
+        old = self.get_settings()
+        candidate = validate({**old, **(patch or {})})
         if self._window_port is not None:
-            try:
-                self._window_port.apply_settings(data)
-            except Exception:
-                pass
-        return data
+            self._window_port.apply_settings(candidate)   # 失败必须向上抛，禁止吞掉
+        return self._settings_store.save(candidate)
 
     # --- 导出 ---
     def export_json(self, rng: str = "1d") -> dict:

@@ -24,8 +24,9 @@ export function DiagnosticsView({ snap, settings, range, exportResult, onExport,
         </div>
         <div className="head-actions">
           <button className="ghost" onClick={onExport}>导出</button>
-          <button className="ghost" onClick={() => onNavigate("insights")}>回洞察</button>
-          <button className="ghost" onClick={() => onNavigate("card")}>小卡</button>
+          <button className="ghost" data-testid="nav-settings" onClick={() => onNavigate("settings")}>设置</button>
+          <button className="ghost" data-testid="nav-insights" onClick={() => onNavigate("insights")}>回洞察</button>
+          <button className="ghost" data-testid="nav-card" onClick={() => onNavigate("card")}>小卡</button>
         </div>
       </header>
 

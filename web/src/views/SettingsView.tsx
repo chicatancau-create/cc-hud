@@ -50,8 +50,8 @@ export function SettingsView({ settings, onChange, onExport, onPower, onCancelPo
       <header className="page-head">
         <div><h1>设置</h1><p className="dim">改动立即生效并写入 hud-next-state.json</p></div>
         <div className="head-actions">
-          <button className="ghost" onClick={() => onNavigate("insights")}>回洞察</button>
-          <button className="ghost" onClick={() => onNavigate("card")}>小卡</button>
+          <button className="ghost" data-testid="nav-insights" onClick={() => onNavigate("insights")}>回洞察</button>
+          <button className="ghost" data-testid="nav-card" onClick={() => onNavigate("card")}>小卡</button>
         </div>
       </header>
 
@@ -76,7 +76,7 @@ export function SettingsView({ settings, onChange, onExport, onPower, onCancelPo
         </label>
         <label className="switch">
           <input type="checkbox" checked={settings.hollow} onChange={(e) => onChange({ hollow: e.target.checked })} />
-          <span>背景镂空（颜色键，需实机验证）</span>
+          <span>小卡圆角镂空</span>
         </label>
         <div className="field">
           <span>主题</span>

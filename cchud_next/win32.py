@@ -156,6 +156,28 @@ class WindowOps:
             wt.HWND(self.hwnd), wt.DWORD(colorref), int(max(0.0, min(1.0, alpha)) * 255),
             LWA_COLORKEY | LWA_ALPHA))
 
+    def set_round_region(self, width: int, height: int, radius: int) -> bool:
+        """圆角窗口区域：区域外不参与命中测试（可点、无颜色键穿透）。"""
+        rgn = gdi32.CreateRoundRectRgn(0, 0, int(width) + 1, int(height) + 1,
+                                       int(radius), int(radius))
+        if not rgn:
+            return False
+        ok = bool(user32.SetWindowRgn(wt.HWND(self.hwnd), rgn, True))
+        if not ok:
+            gdi32.DeleteObject(rgn)
+        return ok
+
+    def clear_region(self) -> bool:
+        return bool(user32.SetWindowRgn(wt.HWND(self.hwnd), None, True))
+
+    def region_state(self) -> int:
+        """GetWindowRgn：0=无区域/失败，1=NULL，2=SIMPLE，3=COMPLEX。"""
+        rgn = gdi32.CreateRectRgn(0, 0, 0, 0)
+        try:
+            return int(user32.GetWindowRgn(wt.HWND(self.hwnd), rgn))
+        finally:
+            gdi32.DeleteObject(rgn)
+
     def clear_layered(self) -> bool:
         ex = _get_exstyle(self.hwnd) & ~WS_EX_LAYERED
         _set_exstyle(self.hwnd, ex)
@@ -172,6 +194,8 @@ class WindowOps:
                 "colorkey": key.value, "flags": flags.value, "read_ok": bool(ok)}
 
     def set_topmost(self, on: bool) -> bool:
+        user32.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_int, ctypes.c_int, wt.UINT]
         return bool(user32.SetWindowPos(wt.HWND(self.hwnd), HWND_TOPMOST if on else HWND_NOTOPMOST,
                                         0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
 
@@ -190,14 +214,33 @@ class WindowOps:
         user32.GetWindowRect(wt.HWND(self.hwnd), ctypes.byref(rect))
         cw = width if width is not None else rect.right - rect.left
         ch = height if height is not None else rect.bottom - rect.top
-        x = r - cw - margin if "right" in anchor else l + margin
-        y = t + margin if "top" in anchor else b - ch - margin
+        if "center" in anchor:
+            x = l + max(0, (r - l - cw) // 2)
+            y = t + max(0, (b - t - ch) // 2)
+        else:
+            x = r - cw - margin if "right" in anchor else l + margin
+            y = t + margin if "top" in anchor else b - ch - margin
         x = max(l, min(x, r - cw - 4))
         y = max(t, min(y, b - ch - 4))
         flags = SWP_NOACTIVATE | (SWP_NOSIZE if keep_size else 0)
         user32.SetWindowPos(wt.HWND(self.hwnd), 0, int(x), int(y), int(cw), int(ch), flags)
         return {"x": int(x), "y": int(y), "w": int(cw), "h": int(ch),
                 "monitor": mi["device"] if mi else None}
+
+    def rect(self) -> tuple[int, int, int, int]:
+        r = wt.RECT()
+        user32.GetWindowRect(wt.HWND(self.hwnd), ctypes.byref(r))
+        return (int(r.left), int(r.top), int(r.right), int(r.bottom))
+
+    def move(self, x: int, y: int, width: int, height: int) -> dict:
+        user32.SetWindowPos(wt.HWND(self.hwnd), 0, int(x), int(y), int(width), int(height),
+                            SWP_NOACTIVATE)
+        return {"x": int(x), "y": int(y), "w": int(width), "h": int(height)}
+
+    def client_origin(self) -> tuple[int, int]:
+        pt = wt.POINT(0, 0)
+        user32.ClientToScreen(wt.HWND(self.hwnd), ctypes.byref(pt))
+        return int(pt.x), int(pt.y)
 
     def capture(self, path: Path) -> dict:
         """PrintWindow 优先；WebView2 常返回黑图，失败则回退屏幕 BitBlt。"""

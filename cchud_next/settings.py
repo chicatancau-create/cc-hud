@@ -20,6 +20,18 @@ DEFAULTS = {
 }
 BOOL_KEYS = ("topmost", "peek", "hollow")
 LAYOUTS = ("card", "insights", "diagnostics", "settings")
+LAYOUT_SIZES = {
+    "card": (424, 330),
+    "insights": (1180, 800),
+    "diagnostics": (1080, 760),
+    "settings": (760, 640),
+}
+
+
+def use_colorkey(settings: dict | None) -> bool:
+    """小卡局部镂空；大面板一律整窗 alpha。"""
+    s = settings or {}
+    return s.get("layout") == "card" and bool(s.get("hollow"))
 
 
 def validate(raw: dict | None) -> dict:

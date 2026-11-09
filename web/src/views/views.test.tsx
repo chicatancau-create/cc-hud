@@ -40,6 +40,15 @@ describe("InsightsView", () => {
     expect(rows.length).toBeGreaterThan(0);
   });
 
+  it("tiles 顺序固定：热力/工具、模型整行、耗时/守恒", () => {
+    render(<InsightsView snap={base} range="7d" refreshing={false} onRange={noop}
+      onRefresh={noop} onExport={noop} onNavigate={noop} />);
+    const ids = ["tile-heat", "tile-tools", "tile-models", "tile-timing", "tile-conservation"];
+    const nodes = ids.map((id) => screen.getByTestId(id));
+    expect(nodes.map((n) => n.getAttribute("data-testid"))).toEqual(ids);
+    expect(nodes[2]).toHaveClass("wide");
+  });
+
   it("空数据用「本期无记录」且成本显示 —", () => {
     render(<InsightsView snap={emptySnap()} range="7d" refreshing={false} onRange={noop}
       onRefresh={noop} onExport={noop} onNavigate={noop} />);

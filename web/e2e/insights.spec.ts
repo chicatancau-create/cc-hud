@@ -117,3 +117,39 @@ test("窄视口不出现横向溢出", async ({ page }) => {
   expect(overflow).toBeLessThanOrEqual(1);
   await shot(page, "narrow-420");
 });
+
+test("布局密度：KPI 3×2、tiles 顺序与跨列、无横向溢出", async ({ page }) => {
+  await page.setViewportSize({ width: 1180, height: 800 });
+  await page.goto("/");
+  const kpis = page.locator(".kpi");
+  await expect(kpis).toHaveCount(6);
+  const kb = await kpis.evaluateAll((els) => els.map((e) => {
+    const r = e.getBoundingClientRect();
+    return { x: r.x, y: Math.round(r.y), w: r.width };
+  }));
+  expect(new Set(kb.slice(0, 3).map((b) => b.y)).size).toBe(1);
+  expect(new Set(kb.slice(3).map((b) => b.y)).size).toBe(1);
+  expect(kb[3].y).toBeGreaterThan(kb[0].y);
+
+  const box = async (id: string) => {
+    const b = await page.getByTestId(id).boundingBox();
+    expect(b).not.toBeNull();
+    return b!;
+  };
+  const heat = await box("tile-heat");
+  const tools = await box("tile-tools");
+  const models = await box("tile-models");
+  const timing = await box("tile-timing");
+  const cons = await box("tile-conservation");
+  expect(Math.abs(heat.y - tools.y)).toBeLessThanOrEqual(2);
+  expect(Math.abs(timing.y - cons.y)).toBeLessThanOrEqual(2);
+  expect(timing.y).toBeGreaterThan(models.y);
+  expect(Math.abs(models.x - heat.x)).toBeLessThanOrEqual(2);
+  expect(models.width).toBeGreaterThanOrEqual(heat.width + tools.width - 4);
+  expect(Math.abs(models.y - (heat.y + heat.height))).toBeLessThanOrEqual(16);
+
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+  await shot(page, "insights-density");
+});

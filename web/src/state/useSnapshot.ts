@@ -59,9 +59,9 @@ export function useSnapshot(api: HudApi, range: RangeKey): SnapshotState {
     if (cached) {
       setSnap(cached);
       setLoading(false);
-    } else {
-      setSnap(null);
     }
+    // 未命中缓存时保留旧快照（stale-while-revalidate）：范围切换不清空画面，
+    // 避免原生透明小卡在加载间隙露出透明键色导致点击穿透。
     void load();
     const timer = window.setInterval(() => void load(), 30_000);
     return () => window.clearInterval(timer);

@@ -76,6 +76,7 @@ def main() -> int:
         ("verify_export", ["--layout", "card", "--selftest", "export", "--wait", "40", "--shot", "ACCEPT-export"]),
         ("verify_power", ["--layout", "card", "--selftest", "power", "--wait", "30", "--shot", "ACCEPT-power"]),
     )
+    gates.append(run("verify_layout_switch", [PY, "tools/verify_layout_switch.py"], ROOT, timeout=300))
     for name, args in shots:
         g = run(name, [PY, "tools/verify_windows.py", *args], ROOT, timeout=180)
         if g["rc"] != 0:                      # 连续起窗偶发时序抖动，重试一次仍须通过
