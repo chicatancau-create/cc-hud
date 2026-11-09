@@ -247,8 +247,8 @@ function AppInner({ api, mode }: { api: HudApi; mode: "native" | "stub" }) {
   return (
     <div className={`app layout-${layout}`} data-mode={mode}>
       {notice ? <div className="toast" role="status" onClick={() => setNotice("")}>{notice}</div> : null}
-      {error ? <div className="banner">刷新失败：{error}</div> : null}
-      {loading ? <div className="banner">加载中…</div> : null}
+      {error ? <div className="banner" data-tone="error" role="status">刷新失败：{error}</div> : null}
+      {loading ? <div className="banner" role="status">加载中…</div> : null}
 
       {layout === "card" && (
         <CardView snap={snap} range={range} refreshing={refreshing}
@@ -268,7 +268,7 @@ function AppInner({ api, mode }: { api: HudApi; mode: "native" | "stub" }) {
           onNavigate={(l) => navigate(l as NavLayout)} />
       )}
       {layout === "settings" && (
-        <SettingsView settings={settings} onChange={(p) => applyQuiet(p)}
+        <SettingsView settings={settings} version={boot.version} onChange={(p) => applyQuiet(p)}
           onExport={() => void doExport()}
           onPower={(action, confirmed) => api.power(action, confirmed)}
           onCancelPower={() => api.cancel_power()}

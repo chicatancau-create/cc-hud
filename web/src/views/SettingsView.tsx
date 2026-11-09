@@ -3,6 +3,8 @@ import type { Settings } from "../types";
 
 interface Props {
   settings: Settings;
+  /** 宿主版本（bootstrap.version）；测试里可不传 */
+  version?: string;
   onChange: (patch: Partial<Settings>) => void;
   onExport: () => void;
   onPower: (action: string, confirmed: boolean) => Promise<{ ok: boolean; reason?: string }>;
@@ -20,7 +22,11 @@ const POWERS: { action: string; label: string }[] = [
   { action: "logoff", label: "注销" }
 ];
 
-export function SettingsView({ settings, onChange, onExport, onPower, onCancelPower, onNavigate }: Props) {
+const LAYOUT_TEXT: Record<Settings["layout"], string> = {
+  card: "小卡", insights: "洞察", diagnostics: "诊断", settings: "设置"
+};
+
+export function SettingsView({ settings, version, onChange, onExport, onPower, onCancelPower, onNavigate }: Props) {
   const [pending, setPending] = useState<string | null>(null);
   const [msg, setMsg] = useState<string>("");
 
@@ -50,13 +56,13 @@ export function SettingsView({ settings, onChange, onExport, onPower, onCancelPo
       <header className="page-head">
         <div><h1>设置</h1><p className="dim">改动立即生效并写入 hud-next-state.json</p></div>
         <div className="head-actions">
-          <button className="ghost" data-testid="nav-insights" onClick={() => onNavigate("insights")}>回洞察</button>
+          <button className="ghost" data-testid="nav-insights" onClick={() => onNavigate("insights")}>洞察</button>
           <button className="ghost" data-testid="nav-card" onClick={() => onNavigate("card")}>小卡</button>
         </div>
       </header>
 
       <section className="card">
-        <div className="card-head"><h3>外观</h3></div>
+        <div className="card-head"><h3>外观</h3><span className="dim">即时生效</span></div>
         <div className="field">
           <span>整窗透明度（Win32）</span>
           <div className="seg">
@@ -88,9 +94,11 @@ export function SettingsView({ settings, onChange, onExport, onPower, onCancelPo
       </section>
 
       <section className="card">
-        <div className="card-head"><h3>数据</h3></div>
-        <p className="dim">导出当前范围快照（含 revision，URL/凭据已脱敏）。</p>
-        <button className="ghost" onClick={onExport}>导出 JSON</button>
+        <div className="card-head"><h3>数据</h3><span className="dim">只读</span></div>
+        <div className="field">
+          <span>导出当前范围快照（含 revision，URL/凭据已脱敏）</span>
+          <button className="ghost" onClick={onExport}>导出 JSON</button>
+        </div>
       </section>
 
       <section className="card">
@@ -104,6 +112,16 @@ export function SettingsView({ settings, onChange, onExport, onPower, onCancelPo
         </div>
         {msg ? <p className="dim" data-testid="power-msg">{msg}</p> : null}
         {pending ? <button className="ghost" onClick={() => { setPending(null); void onCancelPower(); setMsg("已取消"); }}>取消倒计时</button> : null}
+      </section>
+
+      <section className="card">
+        <div className="card-head"><h3>关于</h3><span className="dim">本地只读</span></div>
+        <ul className="kv">
+          <li><span>版本</span><b>{version || "—"}</b></li>
+          <li><span>当前布局</span><b>{LAYOUT_TEXT[settings.layout]}</b></li>
+          <li><span>状态文件</span><b>hud-next-state.json（程序目录）</b></li>
+          <li><span>数据读取</span><b>各客户端账本只读打开（SQLite mode=ro）</b></li>
+        </ul>
       </section>
     </div>
   );

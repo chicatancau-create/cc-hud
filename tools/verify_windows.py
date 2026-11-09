@@ -102,7 +102,7 @@ def main() -> int:
     # 不设 CC_HUD_SIZE：抓图必须走生产布局尺寸（尺寸由宿主按 DPI 换算）
     env = dict(os.environ, CC_HUD_LAYOUT=args.layout,
                CC_HUD_PROFILE=tempfile.mkdtemp(prefix="cchud-webview-"),
-               CC_HUD_MUTEX=f"Local\cc-hud-verify-{os.getpid()}-{args.layout}")
+               CC_HUD_MUTEX=rf"Local\cc-hud-verify-{os.getpid()}-{args.layout}")
     if args.scroll:
         env["CC_HUD_SCROLL"] = str(args.scroll)
     if args.selftest:

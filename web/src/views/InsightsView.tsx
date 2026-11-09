@@ -1,7 +1,7 @@
 import type { RangeKey, Snapshot } from "../types";
 import { fmtCost, fmtCount, fmtPct, fmtTokens } from "../lib/format";
 import { snapshotBanner } from "../lib/snapStatus";
-import { CacheHint, DailyBars, Heatmap, Kpi, ModelsTable, SourceCard, TimingCard, TokenDonut, ToolsCard } from "../components/pieces";
+import { CacheHint, DailyBars, Heatmap, HourSpark, Kpi, ModelsTable, SourceCard, TimingCard, TokenDonut, ToolsCard } from "../components/pieces";
 import { SessionsGrid } from "../components/SessionsGrid";
 
 interface Props {
@@ -24,6 +24,7 @@ export function InsightsView({ snap, range, refreshing, onRange, onRefresh, onEx
   const okCount = snap.sources.filter((s) => s.status === "ok" && !s.suppressed).length;
   const badChecks = snap.conservation.filter((c) => !c.ok);
   const banner = snapshotBanner(snap);
+  const span = snap.daily.length ? `${snap.daily[0].date} → ${snap.daily.at(-1)?.date}` : "无记录";
   return (
     <div className="page" data-testid="insights">
       <header className="page-head">
@@ -51,36 +52,31 @@ export function InsightsView({ snap, range, refreshing, onRange, onRefresh, onEx
       </header>
 
       {banner ? (
-        <div className="banner" data-testid="snap-status">{banner.text}</div>
+        <div className="banner" data-testid="snap-status" data-tone={banner.tone}>{banner.text}</div>
       ) : null}
 
       <section className="first">
         <div className="kpis">
-          <Kpi label="会话" value={fmtCount(k.sessions)} sub={`${okCount} 路来源正常`} />
+          <Kpi label="会话" value={fmtCount(k.sessions)} sub={`${okCount}/${snap.sources.length} 路来源正常`} />
           <Kpi label="tokens" value={fmtTokens(k.tokens)} sub={`新增 ${fmtTokens(snap.totals.fresh_in)}`} />
           <Kpi label="成本" value={fmtCost(k.cost)} sub={k.cost === null ? "来源无定价" : "本机账"} tone="cost" />
-          <Kpi label="缓存命中" value={fmtPct(k.cache_hit)} sub={k.cache_hit === null ? "无分母" : "读/总输入"} />
+          <Kpi label="缓存命中" value={fmtPct(k.cache_hit)} sub={k.cache_hit === null ? "无分母" : "读 / 总输入"} />
           <Kpi label="活跃日" value={fmtCount(k.active_days)} sub={`请求 ${fmtCount(snap.totals.reqs)}`} />
           <Kpi label="credits" value={k.credits === null ? "—" : k.credits.toFixed(1)} sub="仅 Qoder 系" />
         </div>
         <div className="card usage">
           <div className="card-head">
             <h3>每日 token</h3>
-            <span className="dim">{snap.daily.length ? `${snap.daily[0].date} → ${snap.daily.at(-1)?.date}` : "无记录"}</span>
+            <span className="dim">{span}</span>
           </div>
           <DailyBars snap={snap} />
-          <div className="hour-strip" data-testid="hour-strip">
-            {snap.hourly.map((h) => {
-              const max = Math.max(1, ...snap.hourly.map((x) => x.reqs));
-              return <i key={h.hour} style={{ height: `${Math.max(2, (h.reqs / max) * 100)}%` }} title={`${h.hour} 时 · ${h.reqs} 请求`} />;
-            })}
-          </div>
+          <HourSpark snap={snap} />
         </div>
       </section>
 
       <section className="stats">
         <div className="card">
-          <div className="card-head"><h3>token 构成</h3></div>
+          <div className="card-head"><h3>token 构成</h3><span className="dim">占总量</span></div>
           <TokenDonut snap={snap} />
         </div>
         <div className="card">
@@ -91,7 +87,7 @@ export function InsightsView({ snap, range, refreshing, onRange, onRefresh, onEx
                 const max = Math.max(1, ...snap.apps.map((x) => x.tokens));
                 return (
                   <li key={a.key}>
-                    <span className="app-name">{a.name}</span>
+                    <span className="app-name" title={a.name}>{a.name}</span>
                     <span className="app-track"><i style={{ width: `${(a.tokens / max) * 100}%` }} /></span>
                     <b>{fmtTokens(a.tokens)}</b>
                   </li>
@@ -104,7 +100,7 @@ export function InsightsView({ snap, range, refreshing, onRange, onRefresh, onEx
 
       <section className="tiles">
         <div className="card tile" data-testid="tile-heat">
-          <div className="card-head"><h3>活跃热力图</h3><span className="dim">8 周</span></div>
+          <div className="card-head"><h3>活跃热力图</h3><span className="dim">近 26 周</span></div>
           <Heatmap snap={snap} />
         </div>
         <div className="card tile" data-testid="tile-tools">
@@ -112,7 +108,7 @@ export function InsightsView({ snap, range, refreshing, onRange, onRefresh, onEx
           <ToolsCard snap={snap} />
         </div>
         <div className="card tile wide" data-testid="tile-models">
-          <div className="card-head"><h3>模型</h3><span className="dim">按 token</span></div>
+          <div className="card-head"><h3>模型</h3><span className="dim">按 token 降序</span></div>
           <ModelsTable snap={snap} />
         </div>
         <div className="card tile" data-testid="tile-timing">
@@ -120,14 +116,19 @@ export function InsightsView({ snap, range, refreshing, onRange, onRefresh, onEx
           <TimingCard snap={snap} />
         </div>
         <div className="card tile" data-testid="tile-conservation">
-          <div className="card-head"><h3>守恒校验</h3><span className="dim">{snap.conservation.length} 项</span></div>
+          <div className="card-head">
+            <h3>守恒校验</h3>
+            <span className={badChecks.length ? "warn" : "ok-text"}>
+              {badChecks.length ? `${badChecks.length} 项失败` : `${snap.conservation.length} 项全通过`}
+            </span>
+          </div>
           {snap.conservation.length === 0 ? <div className="empty-note">无校验项</div> : (
             <ul className="checks">
               {snap.conservation.map((c) => (
                 <li key={c.name} className={c.ok ? "ok" : "bad"}>
                   <i>{c.ok ? "✓" : "✕"}</i>
                   <span className="mono">{c.name}</span>
-                  <span className="dim">{c.detail}</span>
+                  <span className="dim" title={c.detail}>{c.detail}</span>
                 </li>
               ))}
             </ul>

@@ -1,39 +1,92 @@
 :root {
-  --bg: #0b0e14;
-  --card: #10131d;
-  --card2: #171a24;
-  --edge: #262b36;
-  --track: #1c1f2a;
-  --fg: #e8edf5;
-  --dim: #8a97a8;
-  --faint: #7f8b9e;
-  --muted: #757f93;
-  --accent: #7cc4ff;
-  --c-in: #3b82f6;
-  --c-out: #10b981;
-  --c-read: #a855f7;
-  --c-write: #f97316;
-  --ok: #34d399;
-  --warn: #fbbf24;
-  --err: #f87171;
-  --radius: 12px;
-  --radius-sm: 8px;
-  --gap: 10px;
+  /* ── 底色与层次 ───────────────────────────────────────────── */
+  --bg: #0a0c12;
+  --bg-soft: #0d1017;
+  --card: #10131c;
+  --card2: #161a25;
+  --card3: #1c2130;
+  --edge: #232937;
+  --edge-soft: #1b2130;
+  --track: #1a1f2c;
+
+  /* ── 文字 ─────────────────────────────────────────────────── */
+  --fg: #e9eef7;
+  --dim: #98a5b8;
+  --faint: #7d8a9e;
+  --muted: #6b7789;
+
+  /* ── 语义色 ───────────────────────────────────────────────── */
+  --accent: #6fb3ff;
+  --accent-soft: rgba(111, 179, 255, .14);
+  --c-in: #5b9dff;
+  --c-out: #2fd39a;
+  --c-read: #a97bf5;
+  --c-write: #ff9a4d;
+  --ok: #3ddc97;
+  --warn: #f7c948;
+  --err: #ff7a7a;
+
+  /* ── 形状与节奏 ───────────────────────────────────────────── */
+  --radius: 14px;
+  --radius-sm: 10px;
+  --radius-xs: 7px;
+  --gap: 12px;
+  --pad: 16px;
+  --shadow: 0 10px 30px rgba(0, 0, 0, .35);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, .25);
+  --hair: 1px solid var(--edge-soft);
+
+  /* ── 图表专用（深浅主题各一套，避免浅色下柱体淡到看不见） ── */
+  --bar-from: #6fb3ff;
+  --bar-to: rgba(111, 179, 255, .20);
+  --hour-on: rgba(111, 179, 255, .55);
+  --hour-off: rgba(111, 179, 255, .16);
+  --heat-1: rgba(111, 179, 255, .26);
+  --heat-2: rgba(111, 179, 255, .48);
+  --heat-3: rgba(111, 179, 255, .72);
+  --heat-4: #6fb3ff;
+
+  /* ── 字体 ─────────────────────────────────────────────────── */
   --font: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
   --mono: ui-monospace, "Cascadia Mono", "SFMono-Regular", Menlo, monospace;
 }
 
 body[data-theme="light"] {
-  --bg: #f4f6fa;
+  --bg: #f2f5fa;
+  --bg-soft: #eaeef6;
   --card: #ffffff;
-  --card2: #f0f3f8;
-  --edge: #d9dfe9;
-  --track: #e6ebf3;
-  --fg: #101725;
-  --dim: #4d596b;
-  --faint: #5b6678;
-  --muted: #6b7688;
-  --accent: #1d6fd8;
+  --card2: #f4f7fc;
+  --card3: #e9eef7;
+  --edge: #d6dde9;
+  --edge-soft: #e3e9f2;
+  --track: #e6ecf5;
+
+  --fg: #0f1724;
+  --dim: #4c5a6e;
+  --faint: #5d6b7f;
+  --muted: #6d7b8f;
+
+  --accent: #1f6fd0;
+  --accent-soft: rgba(31, 111, 208, .12);
+  --ok: #0e8f5f;
+  --warn: #a8630a;
+  --err: #c0362c;
+  --c-in: #2f6fd0;
+  --c-out: #0f9d76;
+  --c-read: #7c4fd0;
+  --c-write: #d97706;
+
+  --shadow: 0 10px 30px rgba(16, 32, 64, .10);
+  --shadow-sm: 0 2px 8px rgba(16, 32, 64, .08);
+
+  --bar-from: #2f6fd0;
+  --bar-to: rgba(47, 111, 208, .52);
+  --hour-on: rgba(47, 111, 208, .62);
+  --hour-off: rgba(47, 111, 208, .18);
+  --heat-1: rgba(47, 111, 208, .20);
+  --heat-2: rgba(47, 111, 208, .40);
+  --heat-3: rgba(47, 111, 208, .62);
+  --heat-4: #2f6fd0;
 }
 
 * { box-sizing: border-box; }
@@ -43,19 +96,33 @@ body {
   margin: 0;
   background: var(--bg);
   color: var(--fg);
-  font: 13px/1.45 var(--font);
+  font: 13px/1.5 var(--font);
   -webkit-font-smoothing: antialiased;
 }
 button { font: inherit; color: inherit; cursor: pointer; }
-b, .kpi-value, .hero-value, td, .bar-lbl { font-variant-numeric: tabular-nums; }
-h1, h2, h3, h4 { margin: 0; font-weight: 600; }
-h1 { font-size: 20px; }
+b, .kpi-value, .hero-value, td, .bar-lbl, .num { font-variant-numeric: tabular-nums; }
+h1, h2, h3, h4 { margin: 0; font-weight: 600; letter-spacing: -.01em; }
+h1 { font-size: 19px; }
 h2 { font-size: 14px; }
-h3 { font-size: 12px; letter-spacing: .02em; }
+h3 { font-size: 12.5px; letter-spacing: .01em; }
 p { margin: 0; }
 ul { margin: 0; padding: 0; list-style: none; }
 .dim { color: var(--dim); font-size: 11.5px; }
 .mono { font-family: var(--mono); font-size: 11.5px; }
 .warn { color: var(--warn); }
 .ok-text { color: var(--ok); }
-.empty-note { color: var(--muted); padding: 14px 4px; font-size: 12px; }
+.empty-note { color: var(--muted); padding: 18px 4px; font-size: 12px; }
+
+/* 键盘可达：只在键盘聚焦时显形，鼠标点击不闪 */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+/* 细滚动条：叠在内容之上，不占宽度、不画亮色轨道 */
+* { scrollbar-width: thin; scrollbar-color: var(--edge) transparent; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--edge); border-radius: 99px;
+  border: 2px solid transparent; background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover { background: #333c4e; background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
