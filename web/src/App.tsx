@@ -55,7 +55,7 @@ function AppInner({ api, mode }: { api: HudApi; mode: "native" | "stub" }) {
   const settingsChain = useRef<Promise<unknown>>(Promise.resolve());
   /** 服务端已确认的范围：只有「最新一次」请求失败时才允许回滚到它 */
   const committedRange = useRef<RangeKey>(range);
-  const { snap, loading, refreshing, error, reload } = useSnapshot(api, range);
+  const { snap, loading, refreshing, error, reload } = useSnapshot(api, range, boot !== null);
 
   useEffect(() => {
     let alive = true;

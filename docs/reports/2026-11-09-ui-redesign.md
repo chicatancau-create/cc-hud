@@ -137,7 +137,7 @@
 | `tools/reconcile.py` | rc=0，四范围 `bad=none`（1d 198,244,891/3,278；7d 1,779,197,202/18,912；30d 3,395,915,595/30,020；all 4,054,260,096/63,238） |
 | `npm run lint` | rc=0 |
 | `npm run typecheck` | rc=0 |
-| `npm test` | **24 passed**（4 文件） |
+| `npm test` | **25 passed**（4 文件） |
 | `npm run build` | 成功，`dist/assets/index-CWjhSTBw.css` 21.21 kB / `index-OHGIrBpj.js` 190.59 kB（gzip 59.67） |
 | `tools/verify_windows.py --layout card` | 全 `[PASS]`（capture 530×412） |
 | `tools/verify_layout_switch.py` | `{"ok": true}`，system / 96 / 144 三轮全 ok |
@@ -147,6 +147,26 @@
 `tools/verify_windows.py:105` 的 `CC_HUD_MUTEX=f"Local\cc-hud-verify-..."` 含无效转义 `\c`，
 每次运行抛 `SyntaxWarning: "\c" is an invalid escape sequence`（`-W error` 下直接失败）。
 改成 `rf"Local\cc-hud-verify-..."` 后同一命令 rc=0 且无警告。
+
+### 5.4 首帧范围错位（截图才发现的真 bug）
+
+拍「已提交构建」的四视图时拍到了自相矛盾的一幕：**分段控件高亮「7 天」，画面却是 1 天的数据**
+（3,346 请求 / $28.48，与 `reconcile.py` 的 1d 行吻合）。
+
+根因（`web/src/App.tsx:51` + `web/src/state/useSnapshot.ts:53`）：
+`range` 初值是本地默认 `"1d"`，而 `useSnapshot` 一挂载就按它扫描账本 ——
+一次全量账本读取要 5–8 秒。等 `bootstrap()` 回来把 `range` 改成服务端真值 `"7d"` 时，
+那次 1d 的扫描往往已经返回并渲染到画面上了，于是出现「按钮 7 天 + 数据 1 天」，
+并且白做一次 1d 全量扫描。
+
+修法：给 `useSnapshot` 加 `enabled` 门，`boot === null` 时不发请求（`useSnapshot(api, range, boot !== null)`），
+boot 回包（含服务端 range）到了才开始扫。
+
+验证：`web/src/app.test.tsx` 新增用例「bootstrap 返回前不请求快照；只按服务端 range 请求一次」，
+断言 `snapshot` 只被调用 1 次且参数是 `"7d"`。
+**反证**：把 `if (!enabled) return;` 注释掉，该用例立刻红 ——
+`expected "snapshot" to be called 1 times, but got 2 times`；恢复后 25 passed。
+重拍小卡确认按钮与数据一致（$350 / 17.86亿 / 19,033 请求）。
 
 ---
 

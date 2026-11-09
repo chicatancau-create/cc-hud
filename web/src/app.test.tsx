@@ -118,6 +118,18 @@ describe("布局切换", () => {
   });
 });
 
+describe("首帧范围", () => {
+  it("bootstrap 返回前不请求快照；只按服务端 range 请求一次", async () => {
+    const { api } = makeApi({ layout: "card", bootRange: "7d" });
+    const spy = vi.spyOn(api, "snapshot");
+    await bootCard(api);
+    // 旧实现会先用本地默认 "1d" 扫一遍账本（5–8 秒），导致「按钮 7 天 + 数据 1 天」
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toBe("7d");
+    expect(screen.getByRole("button", { name: "7 天" })).toHaveClass("on");
+  });
+});
+
 describe("设置失败的调用点", () => {
   it("Esc 与小卡切范围失败：提示可见、布局不动、无 unhandled rejection", async () => {
     const { api } = makeApi({ layout: "card", bootRange: "1d", failLayout: true, failRanges: ["7d"] });

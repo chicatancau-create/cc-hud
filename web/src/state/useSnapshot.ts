@@ -11,7 +11,7 @@ export interface SnapshotState {
   cache: SnapshotCache;
 }
 
-export function useSnapshot(api: HudApi, range: RangeKey): SnapshotState {
+export function useSnapshot(api: HudApi, range: RangeKey, enabled = true): SnapshotState {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -51,6 +51,9 @@ export function useSnapshot(api: HudApi, range: RangeKey): SnapshotState {
   }, [api, range]);
 
   useEffect(() => {
+    // boot 未返回时范围还是本地默认值（"1d"），这时不要扫描：账本一次全量读取要 5–8 秒，
+    // 等 boot 回包（含服务端 range）后再发，避免「按钮已显示 7 天、画面却是 1 天数据」的错位。
+    if (!enabled) return;
     // seq 必须全局单调：桥接按全局 last_seq 判 stale，切范围把 seq 归零会被误判为旧响应
     setLoading(true);
     setError(null);
@@ -65,7 +68,7 @@ export function useSnapshot(api: HudApi, range: RangeKey): SnapshotState {
     void load();
     const timer = window.setInterval(() => void load(), 30_000);
     return () => window.clearInterval(timer);
-  }, [range, load]);
+  }, [enabled, range, load]);
 
   return { snap, loading, refreshing, error, reload: () => void load(), cache: cacheRef.current };
 }
