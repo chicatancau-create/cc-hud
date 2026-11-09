@@ -204,6 +204,13 @@ class WindowOps:
 
     def place(self, width: int | None = None, height: int | None = None, monitor: int = 0,
               anchor: str = "top-right", margin: int = 16, keep_size: bool = True) -> dict:
+        """搬位置 / 改尺寸，并回读真实矩形。
+
+        SetWindowPos 的返回值必须检查：WinForms 会按 Min/Max 夹取、WebView2 还会在
+        首帧后异步重排，结果和请求值并不总是相等。旧实现直接回显请求值，导致宿主侧
+        「尺寸是否生效」的校验恒真（熔断永不触发）。这里返回 GetWindowRect 的实际
+        w/h 与 ok，让调用方拿真实值比对。
+        """
         mons = monitors()
         mi = mons[min(monitor, max(0, len(mons) - 1))] if mons else None
         if mi:
@@ -223,9 +230,24 @@ class WindowOps:
         x = max(l, min(x, r - cw - 4))
         y = max(t, min(y, b - ch - 4))
         flags = SWP_NOACTIVATE | (SWP_NOSIZE if keep_size else 0)
-        user32.SetWindowPos(wt.HWND(self.hwnd), 0, int(x), int(y), int(cw), int(ch), flags)
-        return {"x": int(x), "y": int(y), "w": int(cw), "h": int(ch),
-                "monitor": mi["device"] if mi else None}
+        ok = bool(user32.SetWindowPos(wt.HWND(self.hwnd), 0, int(x), int(y),
+                                      int(cw), int(ch), flags))
+        err = 0 if ok else ctypes.get_last_error()
+        after = wt.RECT()
+        read_ok = bool(user32.GetWindowRect(wt.HWND(self.hwnd), ctypes.byref(after)))
+        out = {
+            "x": int(after.left) if read_ok else int(x),
+            "y": int(after.top) if read_ok else int(y),
+            "w": int(after.right - after.left) if read_ok else int(cw),
+            "h": int(after.bottom - after.top) if read_ok else int(ch),
+            "ok": ok,
+            "read_ok": read_ok,
+            "requested": [int(cw), int(ch)],
+            "monitor": mi["device"] if mi else None,
+        }
+        if not ok:
+            out["err"] = err
+        return out
 
     def rect(self) -> tuple[int, int, int, int]:
         r = wt.RECT()

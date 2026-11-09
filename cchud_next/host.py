@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import queue
+import tempfile
 import threading
 import time
 import traceback
@@ -24,6 +25,30 @@ STATUS_PATH = ROOT / "artifacts" / "runtime.json"
 
 # #0b0e14 -> COLORREF 0x00BBGGRR
 BG_COLORREF = 0x00140E0B  # COLORREF(0x00BBGGRR) <- #0b0e14
+
+# 状态文件写锁：三类线程共用（同进程内也会多 Host 实例，故放模块级）
+_STATUS_WRITE_LOCK = threading.Lock()
+
+# os.replace 短重试：Windows 上目标文件被别的进程打开时抛 PermissionError(13)。
+# 实测 layout-switch 工具连着起三个 HUD 实例时会出现（上一个还没退干净），
+# 旧实现 `except OSError: pass` 会静默丢这次状态写入，读侧拿到的是旧内容。
+_STATUS_REPLACE_ATTEMPTS = 4
+_STATUS_REPLACE_DELAY = 0.06
+
+
+def _replace_with_retry(src: str, dst: Path) -> None:
+    """os.replace + PermissionError 短重试；仍失败则把最后一次异常抛给调用方记账。"""
+    last: PermissionError | None = None
+    for attempt in range(_STATUS_REPLACE_ATTEMPTS):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as exc:      # 目标被占用；其余 OSError 不重试
+            last = exc
+            if attempt + 1 < _STATUS_REPLACE_ATTEMPTS:
+                time.sleep(_STATUS_REPLACE_DELAY)
+    assert last is not None
+    raise last
 
 
 def safe_capture_path(root: Path, value: object) -> Path:
@@ -89,6 +114,9 @@ class Host:
         self._init_lock = threading.Lock()
         self._initialized = False
         self._init_started = False
+        self._retry_threads: dict[str, threading.Thread] = {}
+        self._retry_delay = 1.0
+        self.status_path = STATUS_PATH
 
     # ---- WindowPort（供 bridge 调用） ----
     def _run_on_gui(self, fn, *args, timeout: float = 10.0):
@@ -235,8 +263,19 @@ class Host:
         self._run_on_gui(self._pin_native_size, w, h)
         anchor = "top-right" if settings.get("layout") == "card" else "center"
         res = self.ops.place(w, h, 0, anchor, 0 if anchor == "center" else 16, keep_size=False)
-        if res.get("w") != w or res.get("h") != h:
-            raise RuntimeError(f"窗口尺寸未生效：期望 {w}x{h}，实际 {res.get('w')}x{res.get('h')}")
+        # 只有 SetWindowPos 真的失败才算致命（此时窗口根本没被搬动/改尺寸）。
+        if res.get("ok") is False:
+            raise RuntimeError(
+                f"窗口尺寸未生效：SetWindowPos 失败（期望 {w}x{h}，"
+                f"实际 {res.get('w')}x{res.get('h')}, err={res.get('err')}）")
+        aw, ah = int(res.get("w") or w), int(res.get("h") or h)
+        if (aw, ah) != (w, h):
+            # 请求成功但实际尺寸漂移：先记账，纠回交给下面的矩形守卫（设计本意，不 raise）。
+            self.status["size_mismatch"] = {"requested": [int(w), int(h)],
+                                            "actual": [aw, ah], "at": time.time()}
+        else:
+            self.status.pop("size_mismatch", None)
+        # 守卫目标是「请求值」而不是实测值：漂移要靠它拉回目标尺寸。
         self._run_on_gui(self._start_rect_guard,
                          (int(res["x"]), int(res["y"]), int(w), int(h)))
 
@@ -346,7 +385,10 @@ class Host:
         if action == "place":
             if not self.ops:
                 return {"ok": False, "reason": "无窗口"}
-            return {"ok": True, **self.ops.place(None, None, int(value or 0))}
+            res = dict(self.ops.place(None, None, int(value or 0)))
+            # "ok" 保持命令层原义（已受理）；SetWindowPos 的真实结果另记 place_ok/err
+            res.update({"ok": True, "place_ok": bool(res.get("ok", True))})
+            return res
         if action == "capture":
             if not self.ops:
                 return {"ok": False, "reason": "无窗口"}
@@ -430,6 +472,13 @@ class Host:
             self.status["tray_skipped"] = "gui invoke failed"   # 宁可不建，也不建一个收不到点击的托盘
 
     def _ensure_window_ready(self) -> None:
+        """分步建立宿主：哪一步失败只记哪一步，不把整个宿主判死。
+
+        审计教训（host.log 里 15 次 RuntimeError('窗口应用失败：置顶设置失败')）：
+        旧实现用一个 try 包住「布局尺寸 + 外观 + 托盘 + 圆点 + ready」，
+        结果一个外观级的 set_topmost 失败就把托盘、圆点和 ready 全部带走。
+        现在只有拿不到 HWND 才算宿主不可用（这时才允许轮询线程重试）。
+        """
         with self._init_lock:
             if self._initialized:
                 return
@@ -440,49 +489,111 @@ class Host:
             native = self.window.native
             self._log(f"native={type(native)!r} attrs={[a for a in dir(native) if 'andle' in a or 'Handle' in a][:6]}")
             hwnd = int(native.Handle.ToInt64())
-            self.ops = WindowOps(hwnd)
-            self.status.update({
-                "hwnd": hwnd,
-                "pid": os.getpid(),
-                "dpi": dpi_for_window(hwnd),
-                "monitors": monitors(),
-                "work_area": list(work_area(hwnd)),
-            })
-            # pywebview 按物理像素建窗、WebView2 又按系统缩放渲染 -> 右侧被裁。
-            # 用 CSS zoom 反比补偿，使布局视口与窗口一致。
-            try:
-                self.status["dpr"] = self.window.evaluate_js("window.devicePixelRatio")
-                self.status["inner_width"] = self.window.evaluate_js("window.innerWidth")
-                self.window.evaluate_js(
-                    "document.documentElement.style.zoom = String(1 / (window.devicePixelRatio || 1))")
-            except Exception as exc:
-                self.status["zoom_error"] = repr(exc)
-            self._apply_layout_size(self.settings)
-            self.apply_settings(self.settings)
-
-
-            def _late_reapply():
-                time.sleep(1.0)
-                if not self._alive or not self.ops:
-                    return
-                self._schedule_on_gui(lambda: self._apply_layout_size(self.settings))
-
-            threading.Thread(target=_late_reapply, daemon=True).start()
-            self.status["layered"] = self.ops.layered_state()
-            self.status["topmost"] = self.ops.is_topmost()
-            self._schedule_on_gui(self._start_tray)
-            self._place_dot()
-            self.status["ready"] = True
-            self._initialized = True
-            self._write_status()
-            if os.environ.get("CC_HUD_START_HIDDEN"):
-                self._log("selftest hide armed (JS-triggered)")
         except Exception as exc:
-            self._initialized = False   # 让 HWND 轮询线程还能重试
-            self._init_started = False
-            self.status["last_error"] = f"on_loaded: {exc!r}"
-            self._log(f"on_loaded error: {exc!r}")
+            # 没有 HWND = 宿主真的没起来；这是唯一该让轮询线程再试的失败。
+            with self._init_lock:
+                self._init_started = False
+            self.status["last_error"] = f"hwnd: {exc!r}"
+            self._log(f"hwnd error: {exc!r}")
             self._write_status()
+            return
+        self.ops = WindowOps(hwnd)
+        self.status.update({
+            "hwnd": hwnd,
+            "pid": os.getpid(),
+            "dpi": dpi_for_window(hwnd),
+            "monitors": monitors(),
+            "work_area": list(work_area(hwnd)),
+        })
+        # HWND + WindowOps 建立 = 宿主可用；下面几步全是可降级的外观/附属物。
+        self.status["host_ready"] = True
+        self.status["step_errors"] = {}
+        self._run_step("js_zoom", self._apply_js_zoom)
+        self._run_step("layout_size", lambda: self._apply_layout_size(self.settings))
+        # 只有「窗口应用」做一次延迟重试：首帧渲染后框架会再走一遍布局，需要重新钉回去。
+        # 托盘/圆点不重试——重复创建会多出一个图标/窗口。
+        self._run_step("window_apply", lambda: self.apply_settings(self.settings),
+                       retry_fn=self._reapply_window)
+        self._run_step("probe", self._probe_native_state)
+        self._run_step("tray", lambda: self._schedule_on_gui(self._start_tray))
+        self._run_step("dot", self._place_dot)
+        self.status["ready"] = True
+        with self._init_lock:
+            self._initialized = True
+        self._write_status()
+        if os.environ.get("CC_HUD_START_HIDDEN"):
+            self._log("selftest hide armed (JS-triggered)")
+
+    # ---- 启动步骤 ----
+    def _run_step(self, name: str, fn, retry_fn=None) -> bool:
+        """跑一个启动步骤；异常只记进 status["step_errors"]，不向上抛、不拖垮其他步骤。"""
+        try:
+            fn()
+        except Exception as exc:
+            self._record_step_error(name, exc)
+            if retry_fn is not None:
+                self._schedule_step_retry(name, retry_fn)
+            return False
+        return True
+
+    def _record_step_error(self, name: str, exc: BaseException) -> None:
+        errs = self.status.setdefault("step_errors", {})
+        if not isinstance(errs, dict):
+            errs = self.status["step_errors"] = {}
+        errs[name] = repr(exc)
+        self._log(f"step {name} failed: {exc!r}")
+
+    def _schedule_step_retry(self, name: str, fn) -> None:
+        """每个步骤最多一次延迟重试（GUI 线程、~1.0s 后）。"""
+        with self._init_lock:
+            threads = getattr(self, "_retry_threads", None)
+            if threads is None:
+                threads = self._retry_threads = {}
+            if name in threads:
+                return
+            thread = threading.Thread(target=self._retry_later, args=(name, fn), daemon=True)
+            threads[name] = thread
+        thread.start()
+
+    def _retry_later(self, name: str, fn) -> None:
+        time.sleep(float(getattr(self, "_retry_delay", 1.0)))
+        if not self._alive or not self.ops:
+            return
+        self._schedule_on_gui(lambda: self._retry_on_gui(name, fn))
+
+    def _retry_on_gui(self, name: str, fn) -> None:
+        try:
+            fn()
+        except Exception as exc:
+            self._record_step_error(name, exc)
+            self.status.setdefault("step_retry_failed", {})[name] = repr(exc)
+            self._write_status()
+            return
+        errs = self.status.get("step_errors")
+        prev = errs.pop(name, None) if isinstance(errs, dict) else None
+        # 重试成功也不抹掉「曾经失败过」：历史留在 step_recovered，当前错误表里才移除。
+        self.status.setdefault("step_recovered", {})[name] = prev or "ok"
+        self._log(f"step {name} retry ok")
+        self._write_status()
+
+    def _apply_js_zoom(self) -> None:
+        """pywebview 按物理像素建窗、WebView2 又按系统缩放渲染 -> 右侧被裁。
+        用 CSS zoom 反比补偿，使布局视口与窗口一致。"""
+        self.status["dpr"] = self.window.evaluate_js("window.devicePixelRatio")
+        self.status["inner_width"] = self.window.evaluate_js("window.innerWidth")
+        self.window.evaluate_js(
+            "document.documentElement.style.zoom = String(1 / (window.devicePixelRatio || 1))")
+
+    def _probe_native_state(self) -> None:
+        self.status["layered"] = self.ops.layered_state()
+        self.status["topmost"] = self.ops.is_topmost()
+
+    def _reapply_window(self) -> None:
+        """「窗口应用」步骤的延迟重试：尺寸钉回目标 + 效果重新应用一次。
+
+        首帧渲染完成后 WinForms/WebView2 会再走一遍布局，光重设效果不够。"""
+        self._apply_layout_size(self.settings)
+        self.apply_settings(self.settings)
 
     def _place_dot(self) -> None:
         try:
@@ -491,7 +602,8 @@ class Host:
             ops = WindowOps(hwnd)
             # WinForms/WebView2 最小窗约 200x100；用颜色键把除圆点外的同色背景镂空
             ops.set_colorkey(BG_COLORREF, 1.0)
-            self.status["dot_placed"] = ops.place(None, None, 0, "bottom-right", 12)["x"] >= 0
+            res = ops.place(None, None, 0, "bottom-right", 12)
+            self.status["dot_placed"] = bool(res.get("ok") is not False and res["x"] >= 0)
         except Exception as exc:
             self.status["dot_placed"] = False
             self.status["dot_error"] = repr(exc)
@@ -556,13 +668,40 @@ class Host:
             pass
 
     def _write_status(self) -> None:
-        try:
-            STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            tmp = STATUS_PATH.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self.status, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(tmp, STATUS_PATH)
-        except OSError:
-            pass
+        """原子写状态文件：同目录 mkstemp + os.replace，一把写锁串行化。
+
+        GUI / js_api / worker 三类线程都会调这里；旧实现用固定的 runtime.tmp，
+        并发时两个线程互相截断同一个 tmp 文件，读侧会读到半截 JSON。
+        json.dumps 失败（不可序列化对象、并发改动导致 dict size changed）也要记账，
+        不能只捕 OSError 然后静默。落盘经 _replace_with_retry：目标文件被另一个 HUD
+        进程短暂占用时重试几次，仍失败才记 status_write_error。
+        """
+        path = Path(getattr(self, "status_path", STATUS_PATH))
+        with _STATUS_WRITE_LOCK:
+            try:
+                data = json.dumps(dict(self.status), ensure_ascii=False, indent=2)
+            except (TypeError, ValueError, RuntimeError) as exc:
+                self.status["status_write_error"] = repr(exc)
+                self._log(f"status json error: {exc!r}")
+                return
+            tmp = None
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(dir=str(path.parent),
+                                           prefix=path.name + ".", suffix=".tmp")
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(data)
+                _replace_with_retry(tmp, path)
+                tmp = None
+            except (OSError, TypeError, ValueError) as exc:
+                self.status["status_write_error"] = repr(exc)
+                self._log(f"status write error: {exc!r}")
+            finally:
+                if tmp and os.path.exists(tmp):
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
 
     def run(self) -> None:
         if os.environ.get("CC_HUD_LOG"):
@@ -590,7 +729,8 @@ class Host:
                 pass
         self.window = webview.create_window(
             "cc-hud", url, width=w0, height=h0,
-            frameless=True, easy_drag=False, resizable=True, min_size=(360, 300),
+            # resizable=False：尺寸由 Min=Max 钉死，让它可拖拽只会骗人。
+            frameless=True, easy_drag=False, resizable=False, min_size=(360, 300),
             on_top=bool(self.settings.get("topmost", True)),
             background_color="#0b0e14", js_api=self.bridge,
             text_select=True, confirm_close=False,
@@ -680,6 +820,10 @@ class Host:
             self.status["last_error"] = f"quit: {exc!r}"
 
     def _wait_hwnd(self) -> None:
+        """HWND 轮询兜底（loaded 事件可能漏发）；宿主建成即退出。
+
+        宿主段失败（例如拿不到 HWND）时继续轮询重试——旧代码调一次就 return，
+        和注释里「还能重试」的说法不符。"""
         for _ in range(150):
             if not self._alive:
                 return
@@ -690,7 +834,10 @@ class Host:
                     if hwnd:
                         self._log(f"hwnd ready {hwnd}")
                         self._ensure_window_ready()
-                        return
+                        if self._initialized:
+                            return
+                        time.sleep(0.5)   # 宿主段失败：退避后再试，别 0.1s 刷屏
+                        continue
             except Exception:
                 pass
             time.sleep(0.1)

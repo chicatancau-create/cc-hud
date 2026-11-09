@@ -1,5 +1,6 @@
 import type { RangeKey, Snapshot } from "../types";
 import { fmtCost, fmtCount, fmtPct, fmtTokens } from "../lib/format";
+import { snapshotBanner } from "../lib/snapStatus";
 import { CacheHint, DailyBars, Heatmap, Kpi, ModelsTable, SourceCard, TimingCard, TokenDonut, ToolsCard } from "../components/pieces";
 import { SessionsGrid } from "../components/SessionsGrid";
 
@@ -22,6 +23,7 @@ export function InsightsView({ snap, range, refreshing, onRange, onRefresh, onEx
   const k = snap.kpis;
   const okCount = snap.sources.filter((s) => s.status === "ok" && !s.suppressed).length;
   const badChecks = snap.conservation.filter((c) => !c.ok);
+  const banner = snapshotBanner(snap);
   return (
     <div className="page" data-testid="insights">
       <header className="page-head">
@@ -48,12 +50,8 @@ export function InsightsView({ snap, range, refreshing, onRange, onRefresh, onEx
         </div>
       </header>
 
-      {snap.status === "empty" ? (
-        <div className="banner" data-testid="snap-status">本期无记录</div>
-      ) : snap.status === "unsupported" ? (
-        <div className="banner" data-testid="snap-status">没有可用来源（不支持）</div>
-      ) : snap.status === "error" ? (
-        <div className="banner" data-testid="snap-status">全部来源读取失败：下列数字为 0，不代表真实用量</div>
+      {banner ? (
+        <div className="banner" data-testid="snap-status">{banner.text}</div>
       ) : null}
 
       <section className="first">

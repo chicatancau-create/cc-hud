@@ -100,7 +100,8 @@ export interface SourcePayload {
   sessions: number;
   last_seen: number | null;
   warnings: string[];
-  suppressed: { by: string; clash: number } | null;
+  /** by_all：本次冲突涉及的全部来源 key（后端 accounting.collect 新增，by 取其排序首个以兼容旧口径） */
+  suppressed: { by: string; clash: number; by_all?: string[] } | null;
 }
 
 export interface ConservationCheck {

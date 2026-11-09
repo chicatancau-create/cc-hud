@@ -29,7 +29,7 @@ start-hud.bat
 - 九路只读适配器：CC Switch、cc-haha、Qoder、Qoder CN、ZCode、牧羊人、Codex、WorkBuddy 国内/国外、DSH（含 V4 zstd 会话）。
 - 统计守恒（总量 = Σ 日、Σ 小时 = 请求数、模型 ≤ 总量）；会话 id 交集整路拒绝、Codex+DSH 只补缺口。
 - 四档范围（今日 / 7 天 / 30 天 / 全部）、latest-wins 切换、快照缓存 ≤ 8、导出带 `revision` 且按 key 脱敏。
-- 置顶、Win32 整窗透明度、颜色键镂空、Win11 圆点呼出、托盘显隐、电源计划（二次确认，测试用假执行器）。
+- 置顶、Win32 整窗透明度、圆角窗口区域镂空（小卡）/ 颜色键镂空（仅圆点窗）、Win11 圆点呼出、托盘显隐、电源计划（二次确认，测试用假执行器）。
 - 五态区分：加载中 / 无数据 / 真实零值 / 来源不支持 / 读取失败。
 
 ## 数据口径要点
@@ -41,9 +41,9 @@ start-hud.bat
 ## 测试与取证
 
 ```bash
-.venv/Scripts/python.exe -m pytest tests_py -q          # 64 passed
-cd web && npm run lint && npm run typecheck && npm test && npm run build
-cd web && npx playwright test                          # 10 passed (Edge)
+.venv/Scripts/python.exe -m pytest tests_py -q          # 95 passed
+cd web && npm run lint && npm run typecheck && npm test && npm run build   # vitest 24 passed
+cd web && npx playwright test                          # 11 passed (Edge)
 python tools/gate_transcript.py                        # 重跑全部门禁并写 docs/reports/2026-11-08-gate-transcript.md
 python tools/final_acceptance.py                       # 一键实机验收 → artifacts/final-acceptance.json
 python tools/tray_click.py                             # 托盘点击 → 隐藏 → 圆点 → 恢复（行为取证）

@@ -20,10 +20,29 @@ def test_clash_route_is_suppressed(paths):
     ])
     sources = collect(paths, "1d")
     q = [s for s in sources if s.key == "qoder"][0]
-    assert q.suppressed == {"by": "ccswitch", "clash": 1}
+    assert q.suppressed == {"by": "ccswitch", "clash": 1, "by_all": ["ccswitch"]}
     agg = merge(sources, "1d")
     assert agg["totals"]["credits"] == 0.0
     assert agg["totals"]["reqs"] == 1
+
+
+def test_suppression_names_real_conflicting_source(paths):
+    """by 必须指向真正先计入该 sid 的那一路；旧实现硬编码 "ccswitch"。"""
+    jlines(paths.qoder_dir / "dup-1.jsonl", [
+        {"timestamp": iso_utc(local_noon()), "message": {"id": "q1", "usage": {"credits": 1.0}}},
+    ])
+    jlines(paths.home / ".workbuddy" / "projects" / "p1" / "other.jsonl", [
+        {"timestamp": local_noon() * 1000, "sessionId": "dup-1",
+         "providerData": {"rawUsage": {"prompt_tokens": 10, "completion_tokens": 5},
+                          "model": "wb"}},
+    ])
+    sources = collect(paths, "1d")
+    wb = [s for s in sources if s.key == "workbuddy"][0]
+    assert wb.suppressed["by"] == "qoder"
+    assert wb.suppressed["by_all"] == ["qoder"]
+    assert wb.suppressed["clash"] == 1
+    merged = merge(sources, "1d")
+    assert "workbuddy" not in {r["source"] for r in merged["session_rows"]}
 
 
 def test_conservation_all_true_and_models_le_total(paths):

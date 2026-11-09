@@ -53,6 +53,8 @@ function AppInner({ api, mode }: { api: HudApi; mode: "native" | "stub" }) {
   const [notice, setNotice] = useState("");
   const settingsSeq = useRef(0);
   const settingsChain = useRef<Promise<unknown>>(Promise.resolve());
+  /** 服务端已确认的范围：只有「最新一次」请求失败时才允许回滚到它 */
+  const committedRange = useRef<RangeKey>(range);
   const { snap, loading, refreshing, error, reload } = useSnapshot(api, range);
 
   useEffect(() => {
@@ -62,6 +64,7 @@ function AppInner({ api, mode }: { api: HudApi; mode: "native" | "stub" }) {
       setBoot(b);
       setSettings(b.settings);
       setRange(b.settings.range);
+      committedRange.current = b.settings.range;
     }).catch((e: unknown) => {
       if (!alive) return;
       setBootError(String(e));
@@ -78,26 +81,35 @@ function AppInner({ api, mode }: { api: HudApi; mode: "native" | "stub" }) {
 
   const change = useCallback(async (patch: Partial<Settings>) => {
     const id = ++settingsSeq.current;
-    const prevRange = range;
     if (patch.range) setRange(patch.range);   // 先切范围，再等设置回包
     const run = settingsChain.current.then(() => api.set_settings(patch));
     settingsChain.current = run.catch(() => undefined);   // 串行写，服务端顺序=点击顺序
     try {
       const next = await run;
-      if (id === settingsSeq.current) setSettings(next);   // 只认最后一次设置回包
+      // 串行写在前面已排空，这条回包就是「此刻的服务端真值」，与是否过时无关
+      committedRange.current = next.range;
+      if (id === settingsSeq.current) {
+        setSettings(next);                    // 只认最后一次设置回包
+        if (patch.range) setRange(next.range);  // 用服务端权威值重同步乐观范围
+      }
       return next;
     } catch (e) {
-      if (patch.range) setRange(prevRange);               // 原生失败：回滚乐观范围
+      // 只有最新一次请求可以改 range：被取代的请求失败时既不回滚、也不打扰用户，
+      // 否则两次快速切范围时先发的那次会把 range 滚回旧值且再没人把它同步回来。
       if (id === settingsSeq.current) {
+        if (patch.range) setRange(committedRange.current);   // 回滚到服务端最后确认的范围
         setNotice(`设置失败：${e instanceof Error ? e.message : String(e)}`);
       }
       throw e;
     }
-  }, [api, range]);
+  }, [api]);
 
-  const navigate = useCallback((layout: NavLayout) => {
-    void change({ layout }).catch(() => undefined);
+  /** change() 失败已由 notice 提示，调用点只负责别让 rejection 逃出去（unhandled rejection） */
+  const applyQuiet = useCallback((patch: Partial<Settings>) => {
+    void change(patch).catch(() => undefined);
   }, [change]);
+
+  const navigate = useCallback((layout: NavLayout) => applyQuiet({ layout }), [applyQuiet]);
 
   useEffect(() => {
     const m = window.location.hash.match(/scroll=(\d+)/);
@@ -187,11 +199,11 @@ function AppInner({ api, mode }: { api: HudApi; mode: "native" | "stub" }) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") void change({ layout: "card" });
+      if (e.key === "Escape") applyQuiet({ layout: "card" });
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [change]);
+  }, [applyQuiet]);
 
   const doExport = useCallback(async () => {
     try {
@@ -240,13 +252,13 @@ function AppInner({ api, mode }: { api: HudApi; mode: "native" | "stub" }) {
 
       {layout === "card" && (
         <CardView snap={snap} range={range} refreshing={refreshing}
-          onRange={(r) => void change({ range: r })}
+          onRange={(r) => applyQuiet({ range: r })}
           onExpand={() => navigate("insights")}
           onSettings={() => navigate("settings")} />
       )}
       {layout === "insights" && (
         <InsightsView snap={snap} range={range} refreshing={refreshing}
-          onRange={(r) => void change({ range: r })}
+          onRange={(r) => applyQuiet({ range: r })}
           onRefresh={reload} onExport={() => void doExport()}
           onNavigate={(l) => navigate(l as NavLayout)} />
       )}
@@ -256,7 +268,7 @@ function AppInner({ api, mode }: { api: HudApi; mode: "native" | "stub" }) {
           onNavigate={(l) => navigate(l as NavLayout)} />
       )}
       {layout === "settings" && (
-        <SettingsView settings={settings} onChange={(p) => void change(p).catch(() => undefined)}
+        <SettingsView settings={settings} onChange={(p) => applyQuiet(p)}
           onExport={() => void doExport()}
           onPower={(action, confirmed) => api.power(action, confirmed)}
           onCancelPower={() => api.cancel_power()}

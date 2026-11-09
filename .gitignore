@@ -13,3 +13,4 @@ artifacts/
 .webview*/
 .wv-*/
 cc-hud-usage-*.json
+.memsearch/

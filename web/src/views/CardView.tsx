@@ -1,5 +1,6 @@
 import type { RangeKey, Snapshot } from "../types";
 import { fmtCost, fmtCount, fmtPct, fmtTokens } from "../lib/format";
+import { snapshotBanner } from "../lib/snapStatus";
 
 interface Props {
   snap: Snapshot;
@@ -22,8 +23,10 @@ export function CardView({ snap, range, refreshing, onRange, onExpand, onSetting
   const okCount = snap.sources.filter((s) => s.status === "ok" && !s.suppressed).length;
   const errCount = snap.sources.filter((s) => s.status === "error").length;
   const unsupported = snap.sources.filter((s) => s.status === "unsupported").length;
+  // 与 InsightsView 同一口径（snap.status）：全错/空/不支持时小卡也必须说明数字不可信
+  const banner = snapshotBanner(snap);
   return (
-    <div className="card-view" data-testid="card-view">
+    <div className={banner ? "card-view has-status" : "card-view"} data-testid="card-view">
       <header className="card-head">
         <div className="brand">
           <span className="dot" data-alive={refreshing ? "busy" : "idle"} />
@@ -42,6 +45,13 @@ export function CardView({ snap, range, refreshing, onRange, onExpand, onSetting
           <button className="icon" data-testid="expand-insights" title="展开洞察" aria-label="展开洞察" onClick={onExpand}>⤢</button>
         </div>
       </header>
+
+      {banner ? (
+        <div className="card-banner" data-testid="card-status" data-tone={banner.tone}
+          role="status" title={banner.text}>
+          {banner.short}
+        </div>
+      ) : null}
 
       <div className="hero">
         <div>

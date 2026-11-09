@@ -64,6 +64,10 @@ body.mode-card .app { width: 100%; max-width: none; margin: 0; height: 100%; }
   width: 100%; padding: 14px; display: grid; gap: 10px;
   background: var(--card); border: 1px solid var(--edge); border-radius: 14px;
 }
+/* 出现状态横幅时收紧本卡内的垂直间隙：横幅那一行从既有 gap 里让出来，
+   330 逻辑像素窗口里 5 行内容（header/hero/mini-row/app-bars/foot）+ 横幅仍不溢出，
+   正常态（无 has-status）完全不受影响。 */
+.card-view.has-status { gap: 6px; }
 .card-view .card-head { margin: 0; flex-wrap: wrap; row-gap: 6px; }
 .brand { display: flex; align-items: center; gap: 7px; }
 .brand b { font-size: 13px; letter-spacing: .04em; }
@@ -86,6 +90,19 @@ body.mode-card .app { width: 100%; max-width: none; margin: 0; height: 100%; }
 .app-bar em { font-style: normal; text-align: right; color: var(--faint); font-variant-numeric: tabular-nums; }
 .card-foot { display: flex; gap: 10px; align-items: center; font-size: 11px; color: var(--dim); border-top: 1px solid var(--edge); padding-top: 8px; }
 .card-foot .warn { margin-left: auto; }
+/* 小卡状态横幅：只在 empty/unsupported/error 出现，正常数据不占行。
+   单行 + ellipsis，高度由「padding + line-height」撑出（约 22px），
+   不写死高度；多出的这一行由 .card-view.has-status 的 6px gap 吸收。
+   424x330 逻辑像素下最坏情形（4 条 app-bar + 横幅）= 内容 259.8 + 5*6 + 28 = 317.8。 */
+.card-banner {
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: 7px;
+  font-size: 10.5px; line-height: 1.45;
+  border: 1px solid var(--edge); background: var(--card2); color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.card-banner[data-tone="warn"] { border-color: rgba(251,191,36,.32); background: rgba(251,191,36,.12); color: var(--warn); }
+.card-banner[data-tone="error"] { border-color: rgba(248,113,113,.32); background: rgba(248,113,113,.12); color: var(--err); }
 
 /* ---------- 大面板 ---------- */
 .page {

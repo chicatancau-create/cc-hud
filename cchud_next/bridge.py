@@ -176,12 +176,26 @@ class Bridge:
         return self._settings_store.load()
 
     def set_settings(self, patch: dict | None = None) -> dict:
-        """原生应用成功后才落盘；失败保留旧设置并把可读异常抛给前端。"""
+        """原生应用成功后才落盘；落盘失败则把窗口回滚到旧设置再向上抛。
+
+        旧实现先 apply 再 save，save 一抛异常就是「内存/窗口/磁盘」三方分叉：
+        窗口已是新设置、磁盘还是旧设置，而调用方只看到异常。"""
         old = self.get_settings()
         candidate = validate({**old, **(patch or {})})
         if self._window_port is not None:
             self._window_port.apply_settings(candidate)   # 失败必须向上抛，禁止吞掉
-        return self._settings_store.save(candidate)
+        try:
+            return self._settings_store.save(candidate)
+        except Exception as exc:
+            if self._window_port is None:
+                raise
+            try:
+                self._window_port.apply_settings(old)
+            except Exception as rollback_exc:
+                raise RuntimeError(
+                    f"设置落盘失败，且窗口回滚也失败：save={exc!r} "
+                    f"rollback={rollback_exc!r}") from exc
+            raise
 
     # --- 导出 ---
     def export_json(self, rng: str = "1d") -> dict:

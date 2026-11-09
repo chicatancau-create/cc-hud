@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from cchud_next.bridge import Bridge
 from cchud_next.export import redact, write_export
 from cchud_next.paths import Paths
@@ -118,3 +120,56 @@ def test_settings_clamp_and_persist(tmp_path, paths):
 def test_detail_unknown_source(tmp_path, paths):
     b = make(tmp_path, paths)
     assert b.detail("nope", "1d")["source"] is None
+
+
+class RecPort:
+    """记录每次 apply_settings 的窗口端口；fail_after>0 时第 N 次调用起抛错。"""
+
+    def __init__(self, fail_from: int | None = None):
+        self.calls: list[dict] = []
+        self.fail_from = fail_from
+
+    def apply_settings(self, settings):
+        self.calls.append(dict(settings))
+        if self.fail_from is not None and len(self.calls) >= self.fail_from:
+            raise RuntimeError("native boom")
+
+
+def _failing_store(tmp_path):
+    store = SettingsStore(tmp_path / "s.json")
+    store.save({})                                  # 先落一份默认值（layout=card）
+    before = store.load()
+
+    def boom(settings):
+        raise OSError(28, "No space left on device")
+
+    store.save = boom                               # 实例级替换：模拟磁盘写失败
+    return store, before
+
+
+def test_save_failure_rolls_window_back(tmp_path, paths):
+    store, before = _failing_store(tmp_path)
+    port = RecPort()
+    b = Bridge(root=tmp_path, paths=paths, settings=store, power=FakePower(),
+               window=port, now_fn=lambda: local_noon())
+
+    with pytest.raises(OSError):
+        b.set_settings({"layout": "insights"})
+
+    assert port.calls[0]["layout"] == "insights"    # 先应用了候选设置
+    assert port.calls[-1] == before                 # 落盘失败 → 窗口回滚到旧设置
+    assert store.load()["layout"] == "card"         # 磁盘没被改
+
+
+def test_save_and_rollback_failure_reports_both(tmp_path, paths):
+    store, _before = _failing_store(tmp_path)
+    port = RecPort(fail_from=2)                     # 回滚那一次也失败
+    b = Bridge(root=tmp_path, paths=paths, settings=store, power=FakePower(),
+               window=port, now_fn=lambda: local_noon())
+
+    with pytest.raises(RuntimeError) as ei:
+        b.set_settings({"layout": "insights"})
+
+    msg = str(ei.value)
+    assert "save=" in msg and "rollback=" in msg
+    assert "No space left" in msg and "native boom" in msg

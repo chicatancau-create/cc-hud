@@ -30,7 +30,14 @@ def collect(paths: Paths, rng: str, now: float | None = None) -> list[SourceSnap
     now = time.time() if now is None else now
     base = ccswitch.load(paths, rng, now)
     counted: set[str] = set(base.sids)
+    # sid -> 先把它计入合计的那一路；被抑制时 by 要指向真正的冲突来源（不能写死 ccswitch）
+    owner: dict[str, str] = {sid: base.key for sid in base.sids}
     out: list[SourceSnapshot] = [base]
+
+    def credit(snap: SourceSnapshot) -> None:
+        for sid in snap.sids:
+            counted.add(sid)
+            owner.setdefault(sid, snap.key)
 
     for mod in (cchaha, qoder, zcode, herdsman, codex, workbuddy, dsh):
         for snap in _as_list(mod.load(paths, rng, now, exclude_sids=counted)):
@@ -39,16 +46,17 @@ def collect(paths: Paths, rng: str, now: float | None = None) -> list[SourceSnap
                 out.append(snap)
                 continue
             if snap.key in GAP_SOURCES:
-                counted |= snap.sids
+                credit(snap)
                 out.append(snap)
                 continue
             clash = snap.sids & counted
             if clash:
-                snap.suppressed = {"by": "ccswitch", "clash": len(clash)}
+                by = sorted({owner.get(sid, "unknown") for sid in clash})
+                snap.suppressed = {"by": by[0], "clash": len(clash), "by_all": by}
                 snap.days.clear()
                 out.append(snap)
                 continue
-            counted |= snap.sids
+            credit(snap)
             out.append(snap)
     return out
 
