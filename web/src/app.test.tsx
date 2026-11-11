@@ -34,6 +34,7 @@ function makeApi(opts: BridgeOpts = {}) {
   };
   const pending: PendingCall[] = [];
   const calls: Partial<Settings>[] = [];
+  const cmds: string[] = [];
   const resolveSettings = (patch: Partial<Settings>) => {
     current = { ...current, ...patch };
     return current;
@@ -57,9 +58,39 @@ function makeApi(opts: BridgeOpts = {}) {
     export_json: async () => ({ ok: true, path: "", bytes: 0, revision: 1 }),
     power: async () => ({ ok: true }),
     cancel_power: async () => ({ ok: true }),
-    window: async () => ({ ok: true })
+    window: async () => ({ ok: true }),
+    menu_model: async () => ({ ok: true, items: menuItems(), settings: current }),
+    menu_command: async (id: string) => {
+      cmds.push(id);
+      if (id === "view.insights") {
+        current = { ...current, layout: "insights" };
+        return { ok: true, settings: current };
+      }
+      if (id === "range.30d") {
+        current = { ...current, range: "30d" };
+        return { ok: true, settings: current };
+      }
+      if (id === "action.refresh") return { ok: true };
+      return { ok: true };
+    }
   } as unknown as HudApi;
-  return { api, pending, calls, current: () => current };
+  return { api, pending, calls, cmds, current: () => current };
+}
+
+function menuItems() {
+  const leaf = (id: string, title: string, extra: Record<string, unknown> = {}) => ({
+    id, title, kind: "command", enabled: true, checked: false, danger: false, children: [], ...extra
+  });
+  return [
+    leaf("panel.toggle", "隐藏主面板"),
+    { ...leaf("submenu.view", "视图"), kind: "submenu", children: [
+      leaf("view.card", "小卡"), leaf("view.insights", "洞察"),
+      leaf("view.diagnostics", "诊断"), leaf("view.settings", "设置")
+    ] },
+    { ...leaf("submenu.range", "统计范围"), kind: "submenu", children: [leaf("range.30d", "30 天")] },
+    leaf("action.refresh", "刷新数据"),
+    leaf("app.quit", "退出程序", { danger: true })
+  ];
 }
 
 /**
@@ -115,6 +146,58 @@ describe("布局切换", () => {
     } finally {
       watch.stop();
     }
+  });
+});
+
+describe("主面板右键菜单", () => {
+  it("右键阻止默认菜单，弹出与托盘同源的命令树；Esc 关闭", async () => {
+    const { api } = makeApi({ layout: "insights" });
+    window.pywebview = { api: api as never };
+    render(<App />);
+    await screen.findByTestId("insights");
+
+    const notCancelled = fireEvent.contextMenu(screen.getByTestId("insights"), { clientX: 40, clientY: 60 });
+    expect(notCancelled).toBe(false);                 // preventDefault 生效
+    const menu = await screen.findByTestId("context-menu");
+    expect(menu).toBeInTheDocument();
+    expect(screen.getByTestId("menu-panel.toggle")).toBeInTheDocument();
+    expect(screen.getByTestId("menu-app.quit")).toHaveClass("danger");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("context-menu")).not.toBeInTheDocument());
+    // Esc 关菜单时不能顺带把小卡收起
+    expect(screen.getByTestId("insights")).toBeInTheDocument();
+  });
+
+  it("菜单命令真正走 menu_command，视图/范围随回包更新", async () => {
+    const { api, cmds } = makeApi({ layout: "insights", bootRange: "1d" });
+    window.pywebview = { api: api as never };
+    render(<App />);
+    await screen.findByTestId("insights");
+
+    fireEvent.contextMenu(screen.getByTestId("insights"), { clientX: 10, clientY: 10 });
+    await screen.findByTestId("context-menu");
+    await userEvent.click(screen.getByTestId("menu-submenu.view"));
+    await userEvent.click(await screen.findByTestId("menu-view.insights"));
+    await waitFor(() => expect(cmds).toContain("view.insights"));
+    await waitFor(() => expect(screen.queryByTestId("context-menu")).not.toBeInTheDocument());
+
+    fireEvent.contextMenu(screen.getByTestId("insights"), { clientX: 10, clientY: 10 });
+    await userEvent.click(await screen.findByTestId("menu-submenu.range"));
+    await userEvent.click(await screen.findByTestId("menu-range.30d"));
+    await waitFor(() => expect(cmds).toContain("range.30d"));
+    await waitFor(() => expect(screen.getByTestId("range-30d")).toHaveClass("on"));
+  });
+
+  it("托盘选中的命令复用同一 runMenu（__cchudTrayMenu）", async () => {
+    const { api, cmds } = makeApi({ layout: "insights" });
+    window.pywebview = { api: api as never };
+    render(<App />);
+    await screen.findByTestId("insights");
+    const hook = (window as unknown as { __cchudTrayMenu?: (id: string) => boolean }).__cchudTrayMenu;
+    expect(typeof hook).toBe("function");
+    await act(async () => { hook!("action.refresh"); await settle(0); });
+    await waitFor(() => expect(cmds).toContain("action.refresh"));
   });
 });
 

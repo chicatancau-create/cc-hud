@@ -14,7 +14,8 @@ test("洞察页：KPI、九路来源卡、模型表", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "上下文洞察" })).toBeVisible();
   await expect(page.locator("article.source")).toHaveCount(11);
   await expect(page.getByTestId("models-table").locator("tbody tr").first()).toBeVisible();
-  await expect(page.getByTestId("heatmap").locator("i")).toHaveCount(56);
+  // 26 周 × 7 天 = 182 格，加图例 5 格
+  await expect(page.getByTestId("heatmap").locator(".heat i")).toHaveCount(182);
   await expect(page.getByTestId("timing-card")).toContainText("P50");
   await expect(page.getByTestId("tools-card")).toContainText("Read");
   await shot(page, "insights");
@@ -50,7 +51,9 @@ test("小卡与设置互通", async ({ page }) => {
 test("诊断页：守恒表与来源状态表", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "设置" }).click();
-  await page.getByRole("button", { name: "回洞察" }).click();
+  await expect(page.getByTestId("settings")).toBeVisible();
+  await page.getByTestId("nav-insights").click();
+  await expect(page.getByTestId("insights")).toBeVisible();
   await page.getByRole("button", { name: "打开诊断" }).click();
   await expect(page.getByTestId("diagnostics")).toBeVisible();
   await expect(page.getByTestId("sources-table").locator("tbody tr")).toHaveCount(11);
@@ -118,7 +121,7 @@ test("窄视口不出现横向溢出", async ({ page }) => {
   await shot(page, "narrow-420");
 });
 
-test("布局密度：KPI 3×2、tiles 顺序与跨列、无横向溢出", async ({ page }) => {
+test("布局密度：KPI 3×2、重要内容上移、检测区下沉且宽屏两列", async ({ page }) => {
   await page.setViewportSize({ width: 1180, height: 800 });
   await page.goto("/");
   const kpis = page.locator(".kpi");
@@ -139,17 +142,59 @@ test("布局密度：KPI 3×2、tiles 顺序与跨列、无横向溢出", async 
   const heat = await box("tile-heat");
   const tools = await box("tile-tools");
   const models = await box("tile-models");
-  const timing = await box("tile-timing");
-  const cons = await box("tile-conservation");
+  // tiles 里只剩三块：热力与工具同行，模型整行紧随其后
   expect(Math.abs(heat.y - tools.y)).toBeLessThanOrEqual(2);
-  expect(Math.abs(timing.y - cons.y)).toBeLessThanOrEqual(2);
-  expect(timing.y).toBeGreaterThan(models.y);
   expect(Math.abs(models.x - heat.x)).toBeLessThanOrEqual(2);
   expect(models.width).toBeGreaterThanOrEqual(heat.width + tools.width - 4);
   expect(Math.abs(models.y - (heat.y + heat.height))).toBeLessThanOrEqual(16);
+
+  // 检测区在会话与数据来源之后、页脚之前
+  const order = await page.evaluate(() => {
+    const q = (s: string) => document.querySelector(s)?.getBoundingClientRect().top ?? -1;
+    return {
+      sessions: q('[data-testid="sessions"]'),
+      sources: q(".sources-grid"),
+      zone: q('[data-testid="checks-zone"]'),
+      foot: q(".page-foot")
+    };
+  });
+  expect(order.zone).toBeGreaterThan(order.sources);
+  expect(order.zone).toBeGreaterThan(order.sessions);
+  expect(order.foot).toBeGreaterThan(order.zone);
+
+  // 宽屏守恒列表两列：同一行出现两个 li
+  const rows = await page.locator('[data-testid="tile-conservation"] .checks li').evaluateAll(
+    (els) => els.map((e) => Math.round(e.getBoundingClientRect().y)));
+  expect(new Set(rows).size).toBeLessThan(rows.length);
 
   const overflow = await page.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   await shot(page, "insights-density");
+});
+
+test("窄屏守恒列表回到单列且无横向溢出", async ({ page }) => {
+  await page.setViewportSize({ width: 460, height: 900 });
+  await page.goto("/");
+  await expect(page.getByTestId("checks-zone")).toBeVisible();
+  const rows = await page.locator('[data-testid="tile-conservation"] .checks li').evaluateAll(
+    (els) => els.map((e) => Math.round(e.getBoundingClientRect().y)));
+  // 单列时每个 li 独占一行（y 全不重复）
+  expect(new Set(rows).size).toBe(rows.length);
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
+  await shot(page, "narrow-checks");
+});
+
+test("主面板右键菜单弹出、Esc 关闭且不改变布局", async ({ page }) => {
+  await page.setViewportSize({ width: 1180, height: 800 });
+  await page.goto("/");
+  await expect(page.getByTestId("insights")).toBeVisible();
+  await page.getByTestId("insights").click({ button: "right", position: { x: 30, y: 30 } });
+  await expect(page.getByTestId("context-menu")).toBeVisible();
+  await expect(page.getByTestId("menu-app.quit")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("context-menu")).toBeHidden();
+  await expect(page.getByTestId("insights")).toBeVisible();
 });

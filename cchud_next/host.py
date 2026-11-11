@@ -14,17 +14,17 @@ from pathlib import Path
 import webview
 
 from . import __version__
+from . import menu as menu_mod
+from .bench import mark as bench_mark, marks as bench_marks
 from .bridge import Bridge
 from .settings import LAYOUT_SIZES, SettingsStore, use_colorkey
 from .win32 import WindowOps, dpi_aware, dpi_for_window, monitors, system_scale, work_area
 
 ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "web" / "dist" / "index.html"
-PEEK = ROOT / "web" / "peek.html"
 STATUS_PATH = ROOT / "artifacts" / "runtime.json"
 
-# #0b0e14 -> COLORREF 0x00BBGGRR
-BG_COLORREF = 0x00140E0B  # COLORREF(0x00BBGGRR) <- #0b0e14
+bench_mark("webview_import")
 
 # 状态文件写锁：三类线程共用（同进程内也会多 Host 实例，故放模块级）
 _STATUS_WRITE_LOCK = threading.Lock()
@@ -98,7 +98,6 @@ class Host:
         if os.environ.get("CC_HUD_HOLLOW"):
             self.settings = dict(self.settings, hollow=True)
         self.window = None
-        self.dot = None
         self.ops: WindowOps | None = None
         self.tray = None
         self.events: queue.Queue[str] = queue.Queue()
@@ -428,31 +427,42 @@ class Host:
 
     def show(self) -> None:
         try:
-            if self.dot:
-                self.dot.hide()
             if self.window:
                 self.window.show()
             self.hidden = False
             if self.tray:
                 self.tray.set(True, "cc-hud · 显示中")
             self.status["hidden"] = False
-            self.status["peek_visible"] = False
             self._write_status()
         except Exception as exc:
             self.status["last_error"] = f"show: {exc!r}"
 
+    def _tray_ok(self) -> bool:
+        """托盘真的可点回来吗：NIM_ADD 成功 + Shell 能给图标矩形。"""
+        t = self.tray
+        if t is None or not getattr(t, "added", False):
+            return False
+        try:
+            return int(getattr(t, "getrect_rc", 1) or 0) == 0
+        except (TypeError, ValueError):
+            return False
+
     def hide(self) -> None:
+        """隐藏主面板。没有可见托盘时拒绝隐藏，否则界面无法找回。"""
         self._log("hide() called")
+        if not self._tray_ok():
+            self.status["hide_blocked"] = "托盘不可用或不可见"
+            self.status["last_error"] = "托盘不可用，已保持主面板可见"
+            self._log("hide blocked: tray unavailable")
+            self.show()
+            return
         try:
             if self.window:
                 self.window.hide()
-            if self.dot:
-                self.dot.show()
             self.hidden = True
             if self.tray:
                 self.tray.set(False, "cc-hud · 已隐藏")
             self.status["hidden"] = True
-            self.status["peek_visible"] = True
             self._write_status()
         except Exception as exc:
             self.status["last_error"] = f"hide: {exc!r}"
@@ -515,9 +525,11 @@ class Host:
         self._run_step("window_apply", lambda: self.apply_settings(self.settings),
                        retry_fn=self._reapply_window)
         self._run_step("probe", self._probe_native_state)
-        self._run_step("tray", lambda: self._schedule_on_gui(self._start_tray))
-        self._run_step("dot", self._place_dot)
+        # 托盘必须在 ready 之前落账：删除圆点后它是唯一找回入口，
+        # 状态文件先报 ready 会让验收工具读到 tray_added=None 而误判。
+        self._run_step("tray", self._start_tray_now)
         self.status["ready"] = True
+        self.status["bench"] = bench_marks()
         with self._init_lock:
             self._initialized = True
         self._write_status()
@@ -595,18 +607,95 @@ class Host:
         self._apply_layout_size(self.settings)
         self.apply_settings(self.settings)
 
-    def _place_dot(self) -> None:
+    def menu_items(self) -> list[dict]:
+        return menu_mod.build(self.settings, self.hidden, self._tray_ok())
+
+    def run_menu(self, cmd_id: str) -> dict:
+        """唯一分发点：托盘原生菜单和前端右键菜单都走这里。
+
+        业务不在这里重写，全部转调已有的设置/窗口/电源路径。
+        """
+        if not cmd_id or not menu_mod.is_known(cmd_id):
+            return {"ok": False, "reason": f"未知菜单命令: {cmd_id}"}
+        parts = cmd_id.split(".")
+        head = parts[0]
+        if head == "panel":
+            self.hide() if not self.hidden else self.show()
+            return {"ok": True, "hidden": self.hidden}
+        if head == "view":
+            return self._menu_set({"layout": parts[1]})
+        if head == "range":
+            return self._menu_set({"range": parts[1]})
+        if head == "setting":
+            key = parts[1]
+            if key in menu_mod.TOGGLES:
+                # check 项：点击即取反当前值，避免前端/托盘各自算一遍状态
+                return self._menu_set({key: not bool(self.settings.get(key))})
+            patch = menu_mod.patch_for(cmd_id)
+            if patch is None:
+                return {"ok": False, "reason": f"未知设置项: {cmd_id}"}
+            return self._menu_set(patch)
+        if head == "action":
+            if parts[1] == "open_settings":
+                return self._menu_set({"layout": "settings"})
+            if parts[1] == "refresh":
+                return {"ok": True, "action": "refresh"}
+            if parts[1] == "export":
+                rng = self.settings.get("range", "1d")
+                try:
+                    out = self.bridge.export_json(rng)
+                except Exception as exc:
+                    return {"ok": False, "reason": repr(exc)}
+                return {"ok": bool(out), "action": "export", "range": rng, "result": out}
+            return {"ok": False, "reason": f"未知动作: {cmd_id}"}
+        if head == "power":
+            # 菜单只负责「请求」；真正的执行仍要经 bridge.power(confirmed=True) 的二次确认路径
+            return {"ok": True, "action": "power", "power": parts[1], "needs_confirm": True}
+        if head == "app" and parts[1] == "quit":
+            self.status["quit_reason"] = "menu"
+            self._write_status()
+            self._schedule_on_gui(self._quit_quiet)
+            return {"ok": True, "action": "quit"}
+        return {"ok": False, "reason": f"未处理: {cmd_id}"}
+
+    def _menu_set(self, patch: dict) -> dict:
+        """设置类菜单命令：走 bridge 的事务路径（原生失败不落盘）。"""
         try:
-            hwnd = int(self.dot.native.Handle.ToInt64())
-            self.status["dot_hwnd"] = hwnd
-            ops = WindowOps(hwnd)
-            # WinForms/WebView2 最小窗约 200x100；用颜色键把除圆点外的同色背景镂空
-            ops.set_colorkey(BG_COLORREF, 1.0)
-            res = ops.place(None, None, 0, "bottom-right", 12)
-            self.status["dot_placed"] = bool(res.get("ok") is not False and res["x"] >= 0)
+            out = self.bridge.set_settings(patch)
         except Exception as exc:
-            self.status["dot_placed"] = False
-            self.status["dot_error"] = repr(exc)
+            return {"ok": False, "reason": str(exc)}
+        self.settings = dict(out)
+        return {"ok": True, "settings": self.settings}
+
+    def _start_tray_now(self) -> None:
+        """建托盘并等它落账（最多 3s）。
+
+        Tray 的 WndProc 必须在 GUI 线程建窗；这里用 Invoke（同步）把创建派发过去，
+        保证 status["tray_added"] 在 ready=true 之前就有确定值。
+        """
+        if self.tray is not None:
+            return
+        native = getattr(self.window, "native", None)
+        in_gui = False
+        try:
+            in_gui = native is not None and not bool(native.InvokeRequired)
+        except Exception:
+            in_gui = native is None
+        if in_gui:
+            self._start_tray()
+            return
+        done = threading.Event()
+
+        def run() -> None:
+            try:
+                self._start_tray()
+            finally:
+                done.set()
+
+        self._schedule_on_gui(run)
+        if not done.wait(3.0):
+            self.status["tray_added"] = False
+            self.status["tray_error"] = "托盘建立超时（GUI 线程 3s 未完成）"
 
     def _start_tray(self) -> None:
         if self.tray is not None:
@@ -626,7 +715,7 @@ class Host:
                     try:
                         if msg == _sysw.WM_TRAY:
                             ev = _sysw.TRAY_EVT.get(lp & 0xFFFF)
-                            if ev:
+                            if ev and self._accept(ev):
                                 host._on_tray(ev)
                             return 1
                     except Exception as exc:
@@ -644,19 +733,53 @@ class Host:
         except Exception as exc:
             self.status["tray_added"] = False
             self.status["tray_error"] = repr(exc)
+            # 托盘建不起来就不能让面板消失；此时保持可见并给出可见的错误提示
+            self.status["last_error"] = f"托盘注册失败：{exc!r}"
 
     def _on_tray(self, ev: str) -> None:
-        if ev in ("toggle", "menu"):
+        if ev == "toggle":
             self.hide() if not self.hidden else self.show()
+            return
+        if ev == "menu":
+            # 右键只弹菜单，绝不顺带切换显隐
+            if self.tray is None:
+                self.status["tray_error"] = "右键菜单不可用：托盘未建立"
+                return
+            # 先记账再弹：TrackPopupMenu 是模态循环，验收要靠这个计数判断菜单确实弹出过
+            self.status["tray_menu_shown"] = int(self.status.get("tray_menu_shown", 0)) + 1
+            self.status["tray_menu_phase"] = "opening"
+            self._write_status()
+            try:
+                picked = self.tray.popup(self.menu_items())
+            except Exception as exc:
+                self.status["tray_error"] = repr(exc)
+                self.status["tray_menu_phase"] = "error"
+                return
+            self.status["tray_menu_phase"] = "closed"
+            self.status["tray_menu_picked"] = picked
+            if picked:
+                # 优先让前端执行：前端右键菜单与托盘必须走同一条分发逻辑。
+                # 前端不在（页面已销毁）时才由宿主直接兜底执行。
+                js = ("window.__cchudTrayMenu ? (window.__cchudTrayMenu(%s), true) : false"
+                      % json.dumps(picked))
+                try:
+                    handled = bool(self.window.evaluate_js(js)) if self.window else False
+                except Exception:
+                    handled = False
+                if not handled:
+                    out = self.run_menu(picked)
+                    self.status["tray_menu_result"] = out
+                    self._write_status()
+                self.status["tray_menu_via"] = "frontend" if handled else "host"
 
     def _tray_loop(self) -> None:
+        """兼容旧调用方；托盘事件现在走 WndProc（GUI 线程）同步处理。"""
         while self._alive:
             try:
                 ev = self.events.get(timeout=0.25)
             except queue.Empty:
                 continue
-            if ev in ("toggle", "menu"):
-                self.hide() if not self.hidden else self.show()
+            self._on_tray(ev)
 
     def _log(self, msg: str) -> None:
         try:
@@ -735,21 +858,6 @@ class Host:
             background_color="#0b0e14", js_api=self.bridge,
             text_select=True, confirm_close=False,
         )
-        self.dot = webview.create_window(
-            "cc-hud-dot", PEEK.as_uri(), width=int(34 * scale), height=int(34 * scale),
-            frameless=True, easy_drag=False, resizable=False, hidden=True, min_size=(34, 34),
-            on_top=True, background_color="#0b0e14", js_api=self.bridge,
-        )
-        def _dot_loaded() -> None:
-            try:
-                self.status["dot_api"] = bool(self.dot.evaluate_js(
-                    "!!(window.pywebview && window.pywebview.api)"))
-            except Exception as exc:
-                self.status["dot_api_error"] = repr(exc)
-        try:
-            self.dot.events.loaded += _dot_loaded
-        except Exception as exc:
-            self.status["dot_hook_error"] = repr(exc)
         try:
             from webview.platforms import edgechromium as _ec
             _orig = _ec.inject_pywebview
@@ -783,8 +891,9 @@ class Host:
             threading.Thread(target=beat, daemon=True).start()
         self.status["started"] = True
         self.status["dist"] = DIST.as_uri()
-        self.status["dot_created"] = self.dot is not None
+        self.status["dot_created"] = False
         self.status["main_created"] = self.window is not None
+        self.status["bench"] = bench_marks()
         self._write_status()
         threading.Thread(target=self._watch_ccswitch, daemon=True).start()
 
@@ -852,7 +961,7 @@ class Host:
                 self.tray.quit()
         except Exception:
             pass
-        for w in (self.dot, self.window):
+        for w in (self.window,):
             try:
                 if w:
                     w.destroy()

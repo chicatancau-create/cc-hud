@@ -48,7 +48,10 @@ def main() -> int:
         "alpha_applied": lay.get("alpha") in (198, 199),   # 0.78*255 截断/四舍五入
         "topmost_off": data.get("topmost") is False,
         "layout_card": data.get("layout") == "card",
-        "dot_placed": bool(data.get("dot_placed")),
+        # 旧配置里带 peek 也必须能正常起来；同时不得因此建出第二窗口
+        "legacy_peek_file_read": state.exists(),
+        "no_dot_window": not data.get("dot_created"),
+        "tray_added": bool(data.get("tray_added")),
     }
     hwnd = int(data.get("hwnd") or 0)
     if hwnd:

@@ -280,6 +280,44 @@ body.mode-card .app { width: 100%; max-width: none; margin: 0; height: 100%; }
 .checks li.ok i { color: var(--ok); }
 .checks li.bad i { color: var(--err); }
 
+/* ── 底部独立检测区：只压缩本区自身的间距，不动全局 token ── */
+.checks-zone { display: grid; gap: 10px; min-width: 0; }
+.checks-zone .card { padding: 11px 14px; }
+.checks-zone .card-head { margin-bottom: 8px; }
+.timing-wide .timing-wrap { gap: 12px; }
+.timing-wide .donut-box.small { width: 76px; height: 76px; }
+.timing-wide .timing-rows { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 14px; }
+.timing-wide .timing-rows li { min-width: 0; }
+/* 宽屏守恒列表两列，把 30 多行的垂直占用压掉一半 */
+.checks-2col { grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 18px; row-gap: 5px; }
+.checks-2col li { line-height: 1.45; }
+
+/* ── 功能菜单（主面板右键）：渲染宿主下发的命令树 ── */
+.context-menu {
+  position: fixed; z-index: 60; min-width: 210px; max-height: 70vh; overflow-y: auto;
+  background: var(--card3); border: 1px solid var(--edge); border-radius: 10px;
+  box-shadow: var(--shadow); padding: 5px; display: grid; gap: 1px;
+}
+.menu-item {
+  display: grid; grid-template-columns: 16px 1fr auto; align-items: center; gap: 6px;
+  background: transparent; border: 0; border-radius: 7px; color: var(--fg);
+  padding: 6px 9px; font-size: 12px; text-align: left; width: 100%;
+}
+.menu-item:hover:not(:disabled) { background: var(--accent-soft); }
+.menu-item:disabled { color: var(--faint); }
+.menu-item.danger { color: var(--err); }
+.menu-item.on { color: var(--fg); font-weight: 600; }
+.menu-item.sub { cursor: default; }
+.menu-check { color: var(--ok); font-size: 10px; text-align: center; }
+.menu-arrow { color: var(--muted); }
+.menu-sep { height: 1px; background: var(--edge-soft); margin: 3px 4px; }
+.menu-sub { position: relative; }
+.menu-sub-list {
+  position: absolute; left: calc(100% - 4px); top: -5px; min-width: 150px;
+  background: var(--card3); border: 1px solid var(--edge); border-radius: 10px;
+  box-shadow: var(--shadow); padding: 5px; display: grid; gap: 1px;
+}
+
 .section-head { display: flex; align-items: baseline; justify-content: space-between; margin: 4px 0 -2px; }
 .sources-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr)); gap: var(--gap); min-width: 0; }
 .source {
@@ -411,6 +449,9 @@ body.mode-card .app { width: 100%; max-width: none; margin: 0; height: 100%; }
   .tiles { grid-template-columns: minmax(0, 1fr); }
   .tile.wide { grid-column: span 1; }
   .hero-value { font-size: 20px; }
+  /* 窄屏守恒列表回到单列，避免横向挤压与文字裁切 */
+  .checks-2col { grid-template-columns: minmax(0, 1fr); column-gap: 0; }
+  .timing-wide .timing-rows { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 640px) {
   .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -103,7 +103,6 @@ export function DiagnosticsView({ snap, settings, range, exportResult, onExport,
         <ul className="kv">
           <li><span>窗口透明度</span><b>{Math.round(settings.alpha * 100)}%</b></li>
           <li><span>置顶</span><b>{settings.topmost ? "开" : "关"}</b></li>
-          <li><span>呼出圆点</span><b>{settings.peek ? "开" : "关"}</b></li>
           <li><span>背景镂空</span><b>{settings.hollow ? "开（圆角区域 + alpha）" : "关"}</b></li>
           <li><span>范围起点</span><b>{snap.start_date ?? "全部"}</b></li>
           <li><span>快照时间</span><b>{new Date(snap.generated_at * 1000).toLocaleString("zh-CN")}</b></li>

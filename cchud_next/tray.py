@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Win32 托盘与进程探测（原 cchud.sysw 迁入，纯 ctypes + Pillow）。"""
 import ctypes
+import time
 from ctypes import wintypes as wt
 
 
@@ -49,9 +50,12 @@ def already_running():
 # ── 系统托盘: 隐藏之后唯一的找回入口(纯 ctypes, 不引第三方) ────────────────
 WM_TRAY = 0x800 + 1
 
-
-TRAY_EVT = {0x202: 'toggle', 0x203: 'toggle', 0x400: 'toggle', 0x401: 'toggle',
-            0x204: 'menu', 0x7B: 'menu'}      # 左键/双击/NIN_SELECT/右键/WM_CONTEXTMENU
+# 一次物理单击会被 Shell 发成好几条消息（DOWN / UP / NIN_SELECT / DBLCLK），
+# 不去抖就会「点一下、切换两次」。同一类事件在 DEBOUNCE 秒内只认第一条。
+LEFT_CODES = (0x202, 0x203, 0x400, 0x401)   # LBUTTONDOWN/DBLCLK/NIN_SELECT/NIN_KEYSELECT
+RIGHT_CODES = (0x204, 0x7B)                 # RBUTTONUP/WM_CONTEXTMENU
+TRAY_EVT = {**{c: 'toggle' for c in LEFT_CODES}, **{c: 'menu' for c in RIGHT_CODES}}
+DEBOUNCE = 0.30
 
 
 def _hicon(size, on):
@@ -127,6 +131,14 @@ class Tray:
 
     def __init__(self, q):
         self.q = q
+        # WndProc 在建窗过程中就会同步收到 WM_NCCREATE/WM_CREATE。
+        # 这些字段必须先就位，否则回调抛 AttributeError → 返回 0 → CreateWindowExW 静默失败。
+        self._taskbar_created = 0
+        self._last: dict[str, float] = {}
+        self.suppressed = 0
+        self.added = False
+        self._icons: dict[bool, int] = {}
+        self._tip = None
         u = ctypes.windll.user32
         k32 = ctypes.windll.kernel32
         k32.GetModuleHandleW.restype = ctypes.c_void_p
@@ -143,12 +155,19 @@ class Tray:
         wc.lpfnWndProc = ctypes.cast(self._proc, ctypes.c_void_p)
         wc.hInstance = hinst
         wc.lpszClassName = 'ccHudTrayWnd'
+        # 必须声明 argtypes/restype：64 位下 hInstance 会按 c_int 截断，
+        # 类和 CreateWindowEx 用的就不是同一个模块句柄，建窗静默返回 NULL（err=0）。
+        u.RegisterClassExW.restype = wt.ATOM
+        u.RegisterClassExW.argtypes = [ctypes.POINTER(_WCX)]
         u.RegisterClassExW(ctypes.byref(wc))   # 类已存在（重试）也不算错
         # 必须是隐藏的顶层窗（WS_EX_TOOLWINDOW），不能用 HWND_MESSAGE：
         # message-only 窗口收不到 TaskbarCreated 等广播，Win11 Shell 会静默丢弃图标
         # （NIM_ADD=1、GetRect=E_FAIL、溢出面板无条目）。2026-11-08 实测顶层窗 GetRect=0。
+        # 父窗口/菜单传 None；hInstance 显式包成 c_void_p：
+        # 64 位句柄按裸 int 传入会被 ctypes 在个别版本上按 32 位校验/截断，
+        # CreateWindowExW 于是静默返回 NULL（err=0），表现为「托盘建不出来」。
         self.hwnd = u.CreateWindowExW(0x80, 'ccHudTrayWnd', 'cc-hud-tray', 0, 0, 0, 0, 0,
-                                      0, 0, hinst, 0)
+                                      None, None, ctypes.c_void_p(hinst), None)
         if not self.hwnd:
             raise ctypes.WinError()
         u.RegisterWindowMessageW.argtypes = [wt.LPCWSTR]
@@ -160,9 +179,6 @@ class Tray:
         self.nid.uID = 1                            # 未赋值时是 0：Shell 不显示该图标，GetRect 也查不到
         self.nid.uFlags = 0x1 | 0x2 | 0x4          # MESSAGE | ICON | TIP
         self.nid.uCallbackMessage = WM_TRAY
-        self._icons = {}
-        self._tip = None
-        self.added = False
         self.set(True, '启动中')
         if not ctypes.windll.shell32.Shell_NotifyIconW(0, ctypes.byref(self.nid)):
             u.DestroyWindow(self.hwnd)      # 失败不留半初始化窗口，否则重试会撞类名
@@ -185,12 +201,85 @@ class Tray:
                 return 0
             if msg == WM_TRAY:
                 ev = TRAY_EVT.get(lp & 0xFFFF)
-                if ev:
+                if ev and self._accept(ev):
                     self.q.put(ev)          # 只丢事件, 不在这里碰 Tk
                 return 1
         except Exception:
             return 0                        # Python 异常逃回原生窗口过程会直接带走进程
         return ctypes.windll.user32.DefWindowProcW(h, msg, wp, lp)
+
+    def _accept(self, ev: str) -> bool:
+        """同一种事件在 DEBOUNCE 内只放行一次，挡掉 Shell 的多消息叠加。"""
+        now = time.monotonic()
+        if now - self._last.get(ev, 0.0) < DEBOUNCE:
+            self.suppressed += 1
+            return False
+        self._last[ev] = now
+        return True
+
+    # ── 右键原生菜单：和主面板共用 cchud_next.menu 生成的同一棵树 ──
+    def popup(self, items: list[dict]) -> str | None:
+        """按菜单树弹原生菜单，返回被选中的命令 id。
+
+        TrackPopupMenu 会阻塞到菜单关闭；菜单句柄用完立刻 DestroyMenu，
+        重复右键不会累积 GDI 对象。调用前必须 SetForegroundWindow，
+        否则点菜单外部不会消失（Win32 的经典坑）。
+        """
+        u = ctypes.windll.user32
+        u.CreatePopupMenu.restype = ctypes.c_void_p
+        u.AppendMenuW.argtypes = [ctypes.c_void_p, wt.UINT, ctypes.c_size_t, wt.LPCWSTR]
+        u.AppendMenuW.restype = wt.BOOL
+        u.DestroyMenu.argtypes = [ctypes.c_void_p]
+        u.TrackPopupMenu.argtypes = [ctypes.c_void_p, wt.UINT, ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_int, wt.HWND, ctypes.c_void_p]
+        u.TrackPopupMenu.restype = ctypes.c_int
+        u.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
+
+        ids: dict[int, str] = {}
+        next_id = [1000]
+
+        MF_STRING, MF_POPUP, MF_SEPARATOR = 0x0, 0x10, 0x800
+        MF_GRAYED, MF_CHECKED, MF_DISABLED = 0x1, 0x8, 0x2
+        TPM_RETURNCMD, TPM_RIGHTBUTTON = 0x100, 0x2
+
+        def build(nodes: list[dict]) -> int:
+            hmenu = u.CreatePopupMenu()
+            for node in nodes:
+                if node.get("kind") == "separator":
+                    u.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
+                    continue
+                flags = MF_STRING
+                if node.get("kind") == "submenu":
+                    sub = build(node.get("children") or [])
+                    flags |= MF_POPUP
+                    if not node.get("enabled", True):
+                        flags |= MF_GRAYED
+                    u.AppendMenuW(hmenu, flags, sub, node.get("title", ""))
+                    continue
+                mid = next_id[0]
+                next_id[0] += 1
+                ids[mid] = str(node.get("id"))
+                if not node.get("enabled", True):
+                    flags |= MF_GRAYED | MF_DISABLED
+                if node.get("checked"):
+                    flags |= MF_CHECKED
+                title = node.get("title", "")
+                if node.get("danger"):
+                    title = "⚠ " + title
+                u.AppendMenuW(hmenu, flags, mid, title)
+            return hmenu
+
+        menu = build(items)
+        pt = wt.POINT()
+        u.GetCursorPos(ctypes.byref(pt))
+        try:
+            u.SetForegroundWindow(self.hwnd)
+            picked = u.TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                      pt.x, pt.y, 0, self.hwnd, None)
+        finally:
+            u.DestroyMenu(menu)
+            u.PostMessageW(self.hwnd, 0, 0, 0)   # 让菜单真正收起
+        return ids.get(int(picked or 0))
 
     def set(self, on, tip):
         """切换图标明暗 + 更新悬停提示(显示中/已隐藏)。"""

@@ -12,10 +12,6 @@ if not exist ".venv\Scripts\pythonw.exe" (
   pause
   exit /b 1
 )
-".venv\Scripts\pythonw.exe" -c "import webview" >/dev/null 2>&1
-if errorlevel 1 (
-  echo [cc-hud] pywebview missing in .venv
-  pause
-  exit /b 1
-)
+rem 不再用第二个 pythonw 预检 import webview（那会把 pywebview 导入两遍、多一个进程）。
+rem 依赖缺失由 cc-hud.pyw 自己用 MessageBox 报错，pythonw 不会静默退出。
 start "" ".venv\Scripts\pythonw.exe" "%~dp0cc-hud.pyw"

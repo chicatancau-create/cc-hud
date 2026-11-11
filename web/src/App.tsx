@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createNativeApi, createStubApi } from "./api/bridge";
 import { useSnapshot } from "./state/useSnapshot";
-import type { Bootstrap, ExportResult, HudApi, RangeKey, Settings } from "./types";
+import { ContextMenu } from "./components/ContextMenu";
+import type { Bootstrap, ExportResult, HudApi, MenuModel, RangeKey, Settings } from "./types";
 import { CardView } from "./views/CardView";
 import { InsightsView } from "./views/InsightsView";
 import { DiagnosticsView } from "./views/DiagnosticsView";
@@ -215,6 +216,57 @@ function AppInner({ api, mode }: { api: HudApi; mode: "native" | "stub" }) {
     }
   }, [api, range]);
 
+  // ── 功能菜单：只在打开时向宿主取同一份命令树 ──
+  const [menu, setMenu] = useState<{ model: MenuModel; x: number; y: number } | null>(null);
+
+  const openMenu = useCallback(async (x: number, y: number) => {
+    try {
+      const model = await api.menu_model();
+      setMenu({ model, x, y });
+    } catch (e) {
+      setNotice(`菜单打开失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [api]);
+
+  const closeMenu = useCallback(() => setMenu(null), []);
+
+  const runMenu = useCallback(async (id: string) => {
+    try {
+      if (id.startsWith("power.")) {
+        const action = id.slice("power.".length);
+        // 菜单点击只是一次请求；这里显式再确认一次，避免误触关机
+        if (!window.confirm(`确认执行电源操作「${action}」？`)) return;
+        const r = await api.power(action, true);
+        setNotice(r.ok ? `已执行 ${action}` : r.reason ?? "执行失败");
+        return;
+      }
+      const r = await api.menu_command(id);
+      if (!r.ok) {
+        setNotice(r.reason ?? "命令失败");
+        return;
+      }
+      if (r.settings) {
+        setSettings(r.settings);
+        setRange(r.settings.range);
+        committedRange.current = r.settings.range;
+      }
+      if (id === "action.refresh") reload();
+      if (id.startsWith("action.export")) {
+        const res = (r as { result?: ExportResult }).result;
+        if (res) setNotice(`已导出 ${res.path}（${res.bytes} B，rev ${res.revision}）`);
+      }
+    } catch (e) {
+      setNotice(`命令失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [api, reload]);
+
+  // 托盘右键选中的命令也交给这份 runMenu 执行：两处菜单同一条分发链路
+  useEffect(() => {
+    const fn = (id: string) => { void runMenu(id); return true; };
+    (window as unknown as { __cchudTrayMenu?: typeof fn }).__cchudTrayMenu = fn;
+    return () => { delete (window as unknown as { __cchudTrayMenu?: typeof fn }).__cchudTrayMenu; };
+  }, [runMenu]);
+
   if (bootError && !boot) {
     return (
       <div className="boot" data-testid="boot-error">
@@ -245,7 +297,15 @@ function AppInner({ api, mode }: { api: HudApi; mode: "native" | "stub" }) {
 
   const layout = settings.layout;
   return (
-    <div className={`app layout-${layout}`} data-mode={mode}>
+    <div className={`app layout-${layout}`} data-mode={mode}
+      onContextMenu={(e) => {
+        e.preventDefault();                 // 挡住 WebView 自带的右键菜单
+        void openMenu(e.clientX, e.clientY);
+      }}>
+      {menu ? (
+        <ContextMenu model={menu.model} x={menu.x} y={menu.y}
+          onPick={(id) => void runMenu(id)} onClose={closeMenu} />
+      ) : null}
       {notice ? <div className="toast" role="status" onClick={() => setNotice("")}>{notice}</div> : null}
       {error ? <div className="banner" data-tone="error" role="status">刷新失败：{error}</div> : null}
       {loading ? <div className="banner" role="status">加载中…</div> : null}

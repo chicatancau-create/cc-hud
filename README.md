@@ -8,11 +8,20 @@ Windows 桌面用量悬浮统计 HUD（2026-11-08 已完成本机整体替换）
 
 | 入口 | 说明 |
 |---|---|
-| `start-hud.bat` | 推荐入口；自检 `web/dist`、`.venv\Scripts\pythonw.exe`、`pywebview` 后拉起 `cc-hud.pyw` |
-| `cc-hud.pyw` | pywebview 宿主入口 |
+| `start-hud.bat` | 推荐入口；只自检 `web/dist` 与 `.venv\Scripts\pythonw.exe` 后直接拉起 `cc-hud.pyw`（不再另起进程预检 `import webview`） |
+| `cc-hud.pyw` | pywebview 宿主入口；依赖缺失/启动失败会弹 MessageBox 并写 `artifacts/startup-error.log`，pythonw 不会静默退出 |
 | `E:\DeskBox\编程工具\CC Switch HUD.lnk` | 已重定向到 `G:\cc-hud\start-hud.bat` |
 
 无开机自启；CC Switch 退出后 HUD 跟随退出，重新启动 CC Switch 不会自动拉起。
+
+## 托盘与右键菜单
+
+- 只创建一个窗口（主面板）。桌面不再有绿色小圆点，`web/peek.html` 已删除；旧配置里的 `peek` 字段仍能正常读取，只是不再生效。
+- **左键单击托盘**：显示 ↔ 隐藏，一次单击只切一次（同类 Shell 消息 300ms 去抖）。
+- **右键托盘**：只弹功能菜单，不改显隐。
+- **主面板右键**：同一份命令树，浏览器默认菜单被阻止；`Esc` 或点外部关闭。
+- 菜单内容：显示/隐藏主面板、视图（小卡/洞察/诊断/设置）、范围（今日/7天/30天/全部）、刷新、导出 JSON、显示设置（透明度/置顶/主题/圆角镂空/打开设置页）、电源（独立危险子菜单，仍需二次确认）、退出程序。
+- 托盘注册失败或不可见时**拒绝隐藏**并保持面板可见（`runtime.json` 的 `hide_blocked` / `last_error` 会写明原因）。
 
 ## 构建与运行
 
@@ -29,7 +38,7 @@ start-hud.bat
 - 九路只读适配器：CC Switch、cc-haha、Qoder、Qoder CN、ZCode、牧羊人、Codex、WorkBuddy 国内/国外、DSH（含 V4 zstd 会话）。
 - 统计守恒（总量 = Σ 日、Σ 小时 = 请求数、模型 ≤ 总量）；会话 id 交集整路拒绝、Codex+DSH 只补缺口。
 - 四档范围（今日 / 7 天 / 30 天 / 全部）、latest-wins 切换、快照缓存 ≤ 8、导出带 `revision` 且按 key 脱敏。
-- 置顶、Win32 整窗透明度、圆角窗口区域镂空（小卡）/ 颜色键镂空（仅圆点窗）、Win11 圆点呼出、托盘显隐、电源计划（二次确认，测试用假执行器）。
+- 置顶、Win32 整窗透明度、圆角窗口区域镂空（小卡）、托盘显隐 + 托盘/主面板同源右键菜单、电源计划（二次确认，测试用假执行器）。
 - 五态区分：加载中 / 无数据 / 真实零值 / 来源不支持 / 读取失败。
 
 ## 数据口径要点
@@ -41,22 +50,26 @@ start-hud.bat
 ## 测试与取证
 
 ```bash
-.venv/Scripts/python.exe -m pytest tests_py -q          # 95 passed
-cd web && npm run lint && npm run typecheck && npm test && npm run build   # vitest 24 passed
-cd web && npx playwright test                          # 11 passed (Edge)
+.venv/Scripts/python.exe -m pytest tests_py -q          # 114 passed
+cd web && npm run lint && npm run typecheck && npm test && npm run build   # vitest 29 passed
+cd web && npm run e2e                                  # 13 passed (Edge，:4179 vite preview)
 python tools/gate_transcript.py                        # 重跑全部门禁并写 docs/reports/2026-11-08-gate-transcript.md
 python tools/final_acceptance.py                       # 一键实机验收 → artifacts/final-acceptance.json
-python tools/tray_click.py                             # 托盘点击 → 隐藏 → 圆点 → 恢复（行为取证）
+python tools/tray_click.py                             # 托盘：左键只切一次 / 右键只弹菜单 / 隐藏后靠托盘找回 / 无小圆点
+python tools/bench_startup.py --rounds 5               # 冷/热启动中位数 + 进程树 + 常驻内存 → artifacts/startup-bench-after.json
 ```
 
-实机窗口/圆点/DPI/镂空/PrintWindow 取证：`python tools/verify_windows.py --layout card --wait 26 --shot my-card`；已安装实例截图：`python tools/verify_installed.py`。验收工具会各自起一份 HUD（单实例闸门），所以跑 `final_acceptance.py` 前要先退出正在运行的 HUD；脚本会预检并直接报 `hud_running`。
+实机窗口/DPI/镂空/PrintWindow 取证：`python tools/verify_windows.py --layout card --wait 20 --shot my-card`；隐藏态（无圆点、托盘可用）：加 `--hidden`；已安装实例截图：`python tools/verify_installed.py`。验收工具会各自起一份 HUD（单实例闸门），所以跑 `final_acceptance.py` 前要先退出正在运行的 HUD；脚本会预检并直接报 `hud_running`。
+
+想对比改造前后启动耗时：`git worktree add ../cc-hud-baseline 2f96309` 后
+`python tools/bench_startup.py --rounds 5 --root ../cc-hud-baseline --label before`。
 
 ## 目录
 
 ```
 cc-hud.pyw            pywebview 入口
 start-hud.bat         启动器（英文提示，GBK/CRLF）
-cchud_next/           宿主、桥接、设置、导出、Win32、托盘、九路 sources/
+cchud_next/           宿主、桥接、设置、导出、Win32、托盘、菜单模型、启动打点、九路 sources/
 web/                  React 前端（src/、e2e/、dist/）
 tests_py/             pytest（适配器/守恒/桥接/设置/托盘结构/窗口定位）
 tools/                实机验收、对账、托盘与安装态取证

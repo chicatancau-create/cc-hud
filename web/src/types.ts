@@ -137,11 +137,31 @@ export interface Snapshot {
 export interface Settings {
   alpha: number;
   topmost: boolean;
+  /** 已废弃（桌面小圆点已移除）；仅为旧配置文件兼容保留读取 */
   peek: boolean;
   range: RangeKey;
   layout: "card" | "insights" | "diagnostics" | "settings";
   theme: "dark" | "light";
   hollow: boolean;
+}
+
+export type MenuKind = "command" | "check" | "radio" | "submenu" | "separator";
+
+export interface MenuNode {
+  id: string;
+  title: string;
+  kind: MenuKind;
+  enabled: boolean;
+  checked: boolean;
+  danger: boolean;
+  children: MenuNode[];
+}
+
+export interface MenuModel {
+  ok: boolean;
+  items: MenuNode[];
+  settings: Settings;
+  fake_power?: boolean;
 }
 
 export interface SourceMeta {
@@ -178,4 +198,6 @@ export interface HudApi {
   power(action: string, confirmed: boolean): Promise<{ ok: boolean; reason?: string }>;
   cancel_power(): Promise<{ ok: boolean }>;
   window(action: string, value?: unknown): Promise<{ ok: boolean; reason?: string }>;
+  menu_model(): Promise<MenuModel>;
+  menu_command(id: string, confirm?: boolean): Promise<{ ok: boolean; reason?: string; settings?: Settings }>;
 }

@@ -77,10 +77,6 @@ export function SettingsView({ settings, version, onChange, onExport, onPower, o
           <span>窗口置顶</span>
         </label>
         <label className="switch">
-          <input type="checkbox" checked={settings.peek} onChange={(e) => onChange({ peek: e.target.checked })} />
-          <span>隐藏后保留呼出圆点</span>
-        </label>
-        <label className="switch">
           <input type="checkbox" checked={settings.hollow} onChange={(e) => onChange({ hollow: e.target.checked })} />
           <span>小卡圆角镂空</span>
         </label>

@@ -111,29 +111,6 @@ export function InsightsView({ snap, range, refreshing, onRange, onRefresh, onEx
           <div className="card-head"><h3>模型</h3><span className="dim">按 token 降序</span></div>
           <ModelsTable snap={snap} />
         </div>
-        <div className="card tile" data-testid="tile-timing">
-          <div className="card-head"><h3>耗时</h3><span className="dim">代理日志实测</span></div>
-          <TimingCard snap={snap} />
-        </div>
-        <div className="card tile" data-testid="tile-conservation">
-          <div className="card-head">
-            <h3>守恒校验</h3>
-            <span className={badChecks.length ? "warn" : "ok-text"}>
-              {badChecks.length ? `${badChecks.length} 项失败` : `${snap.conservation.length} 项全通过`}
-            </span>
-          </div>
-          {snap.conservation.length === 0 ? <div className="empty-note">无校验项</div> : (
-            <ul className="checks">
-              {snap.conservation.map((c) => (
-                <li key={c.name} className={c.ok ? "ok" : "bad"}>
-                  <i>{c.ok ? "✓" : "✕"}</i>
-                  <span className="mono">{c.name}</span>
-                  <span className="dim" title={c.detail}>{c.detail}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
       </section>
 
       <SessionsGrid snap={snap} />
@@ -145,6 +122,33 @@ export function InsightsView({ snap, range, refreshing, onRange, onRefresh, onEx
         </div>
         <div className="sources-grid">
           {snap.sources.map((s) => <SourceCard key={s.key} source={s} />)}
+        </div>
+      </section>
+
+      {/* 底部独立检测区：放在会话与数据来源之后、页脚之前，避免和并排卡片拼高度 */}
+      <section className="checks-zone" data-testid="checks-zone">
+        <div className="card tile wide timing-wide" data-testid="tile-timing">
+          <div className="card-head"><h3>耗时</h3><span className="dim">代理日志实测</span></div>
+          <TimingCard snap={snap} />
+        </div>
+        <div className="card" data-testid="tile-conservation">
+          <div className="card-head">
+            <h3>守恒校验</h3>
+            <span className={badChecks.length ? "warn" : "ok-text"}>
+              {badChecks.length ? `${badChecks.length} 项失败` : `${snap.conservation.length} 项全通过`}
+            </span>
+          </div>
+          {snap.conservation.length === 0 ? <div className="empty-note">无校验项</div> : (
+            <ul className="checks checks-2col">
+              {snap.conservation.map((c) => (
+                <li key={c.name} className={c.ok ? "ok" : "bad"} data-ok={c.ok ? "1" : "0"}>
+                  <i>{c.ok ? "✓" : "✕"}</i>
+                  <span className="mono">{c.name}</span>
+                  <span className="dim" title={c.detail}>{c.detail}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       </section>
 

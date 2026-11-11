@@ -1,4 +1,4 @@
-import type { Bootstrap, ExportResult, HudApi, RangeKey, Settings, Snapshot } from "../types";
+import type { Bootstrap, ExportResult, HudApi, MenuModel, RangeKey, Settings, Snapshot } from "../types";
 import { stubBootstrap, stubSnapshot } from "./stub";
 
 declare global {
@@ -86,9 +86,46 @@ export function createStubApi(): HudApi {
     },
     async window() {
       return { ok: true };
+    },
+    async menu_model(): Promise<MenuModel> {
+      return { ok: true, items: stubMenu(settings), settings };
+    },
+    async menu_command(id: string) {
+      const patch = stubMenuPatch(id);
+      if (patch) {
+        settings = { ...settings, ...patch };
+        return { ok: true, settings };
+      }
+      if (id === "action.refresh") return { ok: true, reason: "刷新（浏览器桩）" };
+      return { ok: false, reason: `桩不执行 ${id}` };
     }
   };
   return api;
+}
+
+function stubMenu(settings: Settings) {
+  const item = (id: string, title: string, extra: Partial<MenuModel["items"][number]> = {}) => ({
+    id, title, kind: "command" as const, enabled: true, checked: false, danger: false, children: [], ...extra
+  });
+  return [
+    item("panel.toggle", "隐藏主面板"),
+    { ...item("sep1", ""), kind: "separator" as const },
+    { ...item("submenu.view", "视图"), kind: "submenu" as const, children: [
+      item("view.card", "小卡", { kind: "radio" as const, checked: settings.layout === "card" }),
+      item("view.insights", "洞察", { kind: "radio" as const, checked: settings.layout === "insights" }),
+      item("view.diagnostics", "诊断", { kind: "radio" as const, checked: settings.layout === "diagnostics" }),
+      item("view.settings", "设置", { kind: "radio" as const, checked: settings.layout === "settings" })
+    ] },
+    item("action.refresh", "刷新数据"),
+    item("action.export", "导出 JSON"),
+    item("app.quit", "退出程序", { danger: true })
+  ];
+}
+
+function stubMenuPatch(id: string): Partial<Settings> | null {
+  if (id.startsWith("view.")) return { layout: id.slice(5) as Settings["layout"] };
+  if (id.startsWith("range.")) return { range: id.slice(6) as Settings["range"] };
+  return null;
 }
 
 export function createNativeApi(): HudApi | null {
@@ -107,7 +144,9 @@ export function createNativeApi(): HudApi | null {
     export_json: (range) => (py.export_json as HudApi["export_json"])(range),
     power: (action, confirmed) => (py.power as HudApi["power"])(action, confirmed),
     cancel_power: must(py.cancel_power as () => Promise<{ ok: boolean }>, "cancel_power"),
-    window: (action, value) => (py.window as HudApi["window"])(action, value)
+    window: (action, value) => (py.window as HudApi["window"])(action, value),
+    menu_model: must(py.menu_model as () => Promise<MenuModel>, "menu_model"),
+    menu_command: (id, confirm) => (py.menu_command as HudApi["menu_command"])(id, confirm)
   };
 }
 

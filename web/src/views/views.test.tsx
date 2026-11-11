@@ -40,13 +40,45 @@ describe("InsightsView", () => {
     expect(rows.length).toBeGreaterThan(0);
   });
 
-  it("tiles 顺序固定：热力/工具、模型整行、耗时/守恒", () => {
+  it("重要内容上移：tiles 只剩热力/工具/模型，检测卡下沉到数据来源之后", () => {
     render(<InsightsView snap={base} range="7d" refreshing={false} onRange={noop}
       onRefresh={noop} onExport={noop} onNavigate={noop} />);
-    const ids = ["tile-heat", "tile-tools", "tile-models", "tile-timing", "tile-conservation"];
-    const nodes = ids.map((id) => screen.getByTestId(id));
-    expect(nodes.map((n) => n.getAttribute("data-testid"))).toEqual(ids);
-    expect(nodes[2]).toHaveClass("wide");
+    const tiles = screen.getByTestId("insights").querySelector(".tiles")!;
+    expect(Array.from(tiles.children).map((n) => n.getAttribute("data-testid")))
+      .toEqual(["tile-heat", "tile-tools", "tile-models"]);
+    expect(screen.getByTestId("tile-models")).toHaveClass("wide");
+
+    const zone = screen.getByTestId("checks-zone");
+    expect(within(zone).getByTestId("tile-timing")).toBeInTheDocument();
+    expect(within(zone).getByTestId("tile-conservation")).toBeInTheDocument();
+
+    // DOM 顺序：会话 → 数据来源 → 底部检测区 → 页脚
+    const page = screen.getByTestId("insights");
+    const order = Array.from(page.children).map((n) => n.className);
+    const idxSessions = order.indexOf("sources-grid") >= 0 ? -1 : order.length;
+    void idxSessions;
+    const html = page.innerHTML;
+    expect(html.indexOf('data-testid="sessions"')).toBeLessThan(html.indexOf('data-testid="checks-zone"'));
+    expect(html.indexOf("数据来源")).toBeLessThan(html.indexOf('data-testid="checks-zone"'));
+    expect(html.indexOf('data-testid="checks-zone"')).toBeLessThan(html.indexOf("page-foot"));
+  });
+
+  it("守恒列表宽屏两列容器；动态数量与失败项都完整渲染", () => {
+    const many = {
+      ...base,
+      conservation: Array.from({ length: 33 }, (_, i) => ({
+        name: `check_${i}`, ok: i !== 7, detail: `detail ${i}`
+      }))
+    };
+    render(<InsightsView snap={many} range="7d" refreshing={false} onRange={noop}
+      onRefresh={noop} onExport={noop} onNavigate={noop} />);
+    const list = screen.getByTestId("tile-conservation").querySelector(".checks")!;
+    expect(list).toHaveClass("checks-2col");
+    const items = list.querySelectorAll("li");
+    expect(items).toHaveLength(33);
+    expect(list.querySelectorAll('li[data-ok="0"]')).toHaveLength(1);
+    // 数量来自数据，不是写死的 32
+    expect(screen.getByTestId("tile-conservation")).toHaveTextContent("1 项失败");
   });
 
   it("空数据用「本期无记录」且成本显示 —", () => {

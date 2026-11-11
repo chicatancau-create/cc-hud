@@ -130,6 +130,18 @@ def main() -> int:
         if proc.poll() is not None:
             break
         time.sleep(0.4)
+    # 托盘在 GUI 线程里异步建立：等它落账再判定，否则会把「还没建」误判成「建不成」
+    deadline2 = time.time() + 12
+    while time.time() < deadline2:
+        if data.get("tray_added") is not None:
+            break
+        if proc.poll() is not None:
+            break
+        time.sleep(0.3)
+        try:
+            data = json.loads(runtime.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
 
     checks: dict[str, dict] = {}
 
@@ -160,8 +172,12 @@ def main() -> int:
     check("runtime_json", bool(data), str(runtime))
     check("window_created", bool(hwnd), hwnd)
     check("main_title", find("cc-hud") is not None, find("cc-hud"))
+    # 第二窗口已删除：任何时刻都不允许存在 cc-hud-dot
     dot_hwnd0 = find_owned("cc-hud-dot", own_pid)
-    check("dot_window", bool(dot_hwnd0) and owner_pid(dot_hwnd0) == own_pid, dot_hwnd0 or None)
+    check("no_dot_window", dot_hwnd0 == 0 and not data.get("dot_created"), {
+        "hwnd": dot_hwnd0 or None, "dot_created": data.get("dot_created")})
+    check("single_window_only", bool(data.get("main_created")) and not data.get("dot_created"),
+          {"main_created": data.get("main_created"), "dot_created": data.get("dot_created")})
     check("file_url", str(data.get("dist", "")).startswith("file://"), data.get("dist"))
     check("tray_added", bool(data.get("tray_added")), data.get("tray_added"))
     if args.selftest:
@@ -192,7 +208,6 @@ def main() -> int:
                 info = {}
         path = info.get("path")
         check("selftest_export", bool(info.get("revision")) and bool(path) and os.path.exists(path), info)
-    check("dot_placed", bool(data.get("dot_placed")), data.get("dot_placed"))
     check("dpi", int(data.get("dpi") or 0) >= 96, data.get("dpi"))
     pid = int(data.get("pid") or 0)
     aw = process_dpi_awareness(pid) if pid else None
@@ -221,18 +236,14 @@ def main() -> int:
             time.sleep(1.0)
         vis = bool(user32.IsWindowVisible(wt.HWND(hwnd)))
         check("visible", (not vis) if args.hidden else vis, vis)
-        dot_hwnd = int(data.get("dot_hwnd") or 0)
-        if not dot_hwnd or owner_pid(dot_hwnd) != proc.pid:
-            dot_hwnd = find_owned("cc-hud-dot", own_pid)
-        if dot_hwnd and owner_pid(dot_hwnd) != proc.pid:
-            dot_hwnd = 0
-        if dot_hwnd:
-            dot_vis = bool(user32.IsWindowVisible(wt.HWND(int(dot_hwnd))))
-            check("peek_visible", dot_vis if args.hidden else not dot_vis, dot_vis)
-            if args.hidden and dot_vis:
-                cap_dot = WindowOps(int(dot_hwnd)).capture(
-                    ROOT / "artifacts" / "windows" / "windows-peek-dot.png")
-                check("peek_capture", bool(cap_dot.get("ok")), cap_dot)
+        if args.hidden:
+            # 隐藏后唯一找回入口是托盘：必须注册成功且仍存在，且没有任何圆点窗口
+            check("tray_available_when_hidden", bool(data.get("tray_added")), {
+                "tray_added": data.get("tray_added"),
+                "tray_hwnd": data.get("tray_hwnd"),
+                "tray_getrect_rc": data.get("tray_getrect_rc")})
+            check("no_dot_when_hidden", find_owned("cc-hud-dot", own_pid) == 0,
+                  find_owned("cc-hud-dot", own_pid) or None)
         if not args.hollow:
             ops.set_alpha(1.0)
         time.sleep(0.35)

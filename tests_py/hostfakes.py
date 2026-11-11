@@ -28,15 +28,22 @@ class FakeNative:
 
 
 class StubWin:
-    """有 HWND 的窗口替身：evaluate_js 只记账。"""
+    """有 HWND 的窗口替身：evaluate_js 只记账，hide/show 只记账。"""
 
     def __init__(self, hwnd: int = 4242):
         self.native = FakeNative(hwnd)
         self.js: list[str] = []
+        self.visible = True
 
     def evaluate_js(self, script):
         self.js.append(script)
         return 1
+
+    def show(self):
+        self.visible = True
+
+    def hide(self):
+        self.visible = False
 
 
 class FlakyNativeWin:
@@ -127,9 +134,9 @@ def make_host(tmp_path, ops: OpsStub | None = None, window=None, **attrs) -> Hos
     h.settings = dict(SETTINGS)
     h.status = {"layout": "card"}
     h.window = window if window is not None else StubWin()
-    h.dot = None
     h.ops = ops
     h.tray = None
+    h.hidden = False
     h._card_pos = None
     h._alive = True
     h._init_lock = threading.Lock()

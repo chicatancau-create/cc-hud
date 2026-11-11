@@ -219,3 +219,49 @@ class Bridge:
         if self._window_port is None:
             return {"ok": False, "reason": "无窗口宿主（浏览器预览）"}
         return self._window_port.command(action, value)
+
+    # --- 功能菜单（托盘与主面板共用同一份模型/分发） ---
+    def menu_model(self) -> dict:
+        """返回菜单树 + 当前设置；无宿主时退回纯设置驱动的静态树。"""
+        port = self._window_port
+        if port is not None and hasattr(port, "menu_items"):
+            items = port.menu_items()
+        else:
+            from . import menu as menu_mod
+            items = menu_mod.build(self.get_settings(), False, True)
+        return {"ok": True, "items": items, "settings": self.get_settings(),
+                "fake_power": not isinstance(self._power_port, SystemPower)}
+
+    def menu_command(self, cmd_id: str, confirm: bool = False) -> dict:
+        """执行菜单命令：视图/范围/刷新/导出/设置/电源/退出全部复用既有路径。"""
+        from . import menu as menu_mod
+
+        if not isinstance(cmd_id, str) or not menu_mod.is_known(cmd_id):
+            return {"ok": False, "reason": f"未知菜单命令: {cmd_id}"}
+        if cmd_id.startswith("power."):
+            action = cmd_id.split(".", 1)[1]
+            # 菜单里的危险动作同样只走 bridge.power 的二次确认
+            return self.power(action, True if confirm else False)
+        if cmd_id.startswith("action.export"):
+            rng = self.get_settings().get("range", "1d")
+            try:
+                out = self.export_json(rng)
+            except Exception as exc:
+                return {"ok": False, "reason": repr(exc)}
+            return {"ok": True, "action": "export", "range": rng, "result": out}
+        if cmd_id.startswith("action."):
+            if self._window_port is None:
+                return {"ok": False, "reason": "无窗口宿主（浏览器预览）"}
+            return self._window_port.run_menu(cmd_id)
+        if cmd_id.startswith("app."):
+            if self._window_port is None:
+                return {"ok": False, "reason": "无窗口宿主（浏览器预览）"}
+            return self._window_port.run_menu(cmd_id)
+        # 视图 / 范围 / 设置类：统一走 set_settings 的事务路径
+        patch = menu_mod.patch_for(cmd_id)
+        if patch is None:
+            return {"ok": False, "reason": f"未处理: {cmd_id}"}
+        try:
+            return {"ok": True, "settings": self.set_settings(patch)}
+        except Exception as exc:
+            return {"ok": False, "reason": str(exc)}

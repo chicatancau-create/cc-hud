@@ -12,6 +12,7 @@ ALPHAS = (1.0, 0.96, 0.92, 0.86, 0.78)
 DEFAULTS = {
     "alpha": 0.96,
     "topmost": True,
+    # 已废弃：桌面小圆点随第二窗口删除而取消。保留键只为旧配置文件不报错、能原样读回。
     "peek": True,
     "range": "1d",
     "layout": "card",

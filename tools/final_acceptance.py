@@ -71,12 +71,14 @@ def main() -> int:
         ("verify_insights", ["--layout", "insights", "--wait", "30", "--shot", "ACCEPT-insights"]),
         ("verify_diagnostics", ["--layout", "diagnostics", "--wait", "30", "--shot", "ACCEPT-diagnostics"]),
         ("verify_settings", ["--layout", "settings", "--wait", "30", "--shot", "ACCEPT-settings"]),
-        ("verify_peek", ["--layout", "card", "--hidden", "--wait", "12", "--shot", "ACCEPT-peek"]),
+        # 隐藏后只能靠托盘找回：验证「无圆点 + 托盘可用」
+        ("verify_hidden_tray", ["--layout", "card", "--hidden", "--wait", "12", "--shot", "ACCEPT-hidden"]),
         ("verify_hollow", ["--layout", "card", "--hollow", "--wait", "30", "--shot", "ACCEPT-hollow"]),
         ("verify_export", ["--layout", "card", "--selftest", "export", "--wait", "40", "--shot", "ACCEPT-export"]),
         ("verify_power", ["--layout", "card", "--selftest", "power", "--wait", "30", "--shot", "ACCEPT-power"]),
     )
     gates.append(run("verify_layout_switch", [PY, "tools/verify_layout_switch.py"], ROOT, timeout=300))
+    gates.append(run("bench_startup", [PY, "tools/bench_startup.py", "--rounds", "3"], ROOT, timeout=600))
     for name, args in shots:
         g = run(name, [PY, "tools/verify_windows.py", *args], ROOT, timeout=180)
         if g["rc"] != 0:                      # 连续起窗偶发时序抖动，重试一次仍须通过
