@@ -1,0 +1,86 @@
+                self.status["status_write_error"] = repr(exc)
+                self._log(f"status json error: {exc!r}")
+                return
+            tmp = None
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd, tmp = tempfile.mkstemp(dir=str(path.parent),
+                                           prefix=path.name + ".", suffix=".tmp")
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(data)
+                _replace_with_retry(tmp, path)
+                tmp = None
+            except (OSError, TypeError, ValueError) as exc:
+                self.status["status_write_error"] = repr(exc)
+                self._log(f"status write error: {exc!r}")
+            finally:
+                if tmp and os.path.exists(tmp):
+                    try:
+                        os.unlink(tmp)
+                    except OSError:
+                        pass
+
+    def run(self) -> None:
+        if os.environ.get("CC_HUD_LOG"):
+            logging.basicConfig(filename=str(self.root / "artifacts" / "pywebview.log"),
+                                level=logging.DEBUG,
+                                format="%(asctime)s %(levelname)s %(name)s %(message)s")
+        self._log("run() start")
+        if not DIST.exists():
+            raise SystemExit(f"缺少前端构建产物: {DIST}（先运行 cd web && npm run build）")
+        dpi_aware()
+        url = DIST.as_uri()
+        if os.environ.get("CC_HUD_START_HIDDEN"):
+            url += "#selftest=hide"
+        if os.environ.get("CC_HUD_SELFTEST"):
+            url += ("&" if "#" in url else "#") + "selftest=" + os.environ["CC_HUD_SELFTEST"]
+        if os.environ.get("CC_HUD_SCROLL"):
+            url += ("&" if "#" in url else "#") + "scroll=" + os.environ["CC_HUD_SCROLL"]
+        scale = system_scale()
+        w0, h0 = int(424 * scale), int(330 * scale)
+        env_size = os.environ.get("CC_HUD_SIZE", "")
+        if "x" in env_size:
+            try:
+                w0, h0 = (int(v) for v in env_size.lower().split("x", 1))
+            except ValueError:
+                pass
+        self.window = webview.create_window(
+            "cc-hud", url, width=w0, height=h0,
+            # resizable=False：尺寸由 Min=Max 钉死，让它可拖拽只会骗人。
+            frameless=True, easy_drag=False, resizable=False, min_size=(360, 300),
+            on_top=bool(self.settings.get("topmost", True)),
+            background_color="#0b0e14", js_api=self.bridge,
+            text_select=True, confirm_close=False,
+        )
+        try:
+            from webview.platforms import edgechromium as _ec
+            _orig = _ec.inject_pywebview
+            def _wrap(platform, window):
+                self._log(f"inject begin {platform} {getattr(window,'title','?')}")
+                try:
+                    r = _orig(platform, window)
+                    self._log("inject ok")
+                    return r
+                except Exception as exc:
+                    self._log(f"inject error {exc!r}")
+                    raise
+            _ec.inject_pywebview = _wrap
+        except Exception as exc:
+            self._log(f"inject wrap failed {exc!r}")
+        self.window.events.loaded += self._on_loaded
+        self.window.events.closed += self._on_closed
+        self._log("handlers attached")
+        webview.start(self._after_start, http_server=False, private_mode=False,
+                      storage_path=os.environ.get("CC_HUD_PROFILE") or str(self.root / ".webview"))
+
+    def _after_start(self) -> None:
+        self._log("after_start")
+        # loaded 事件在不同 pywebview/WebView2 组合下可能漏发；HWND 轮询是幂等兜底。
+        threading.Thread(target=self._wait_hwnd, daemon=True).start()
+        if os.environ.get("CC_HUD_HEARTBEAT"):
+            def beat():
+                for i in range(6):
+                    self._log(f"heartbeat {i}")
+                    time.sleep(1.0)
+            threading.Thread(target=beat, daemon=True).start()
+        self.status["started"] = True

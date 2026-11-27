@@ -1,0 +1,65 @@
+        for fn in names:
+            if fn.endswith(".zstd"):
+                files.append(Path(dirpath) / fn)
+    if not files:
+        return snap.mark_unsupported("DSH V4 会话目录为空")
+    seen_usage = False
+    v4_reqs: dict[str, int] = {}
+    v4_tokens: dict[str, int] = {}
+    v4_last: dict[str, float] = {}
+    v4_model: dict[str, str] = {}
+    for path in sorted(files):
+        sid = path.parent.name
+        if sid in exclude_sids:
+            continue
+        try:
+            raw = _zstd.decompress(path.read_bytes())
+        except Exception:
+            snap.warnings.append(f"{path.name}: 解压失败")
+            continue
+        for line in raw.decode("utf-8", "replace").splitlines():
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            u = _usage_of(ev)
+            if not u:
+                continue
+            seen_usage = True
+            ts = ev.get("time")
+            if not isinstance(ts, (int, float)):
+                continue
+            ep = ts / 1000.0
+            dte = local_date(ep)
+            if start_day and dte < start_day:
+                continue
+            fi = int(u.get("inputTokens") or u.get("input_tokens") or 0)
+            rd = int(u.get("cacheReadTokens") or u.get("cache_read_tokens") or 0)
+            out = int(u.get("outputTokens") or u.get("output_tokens") or 0)
+            cw = int(u.get("cacheWriteTokens") or u.get("cache_write_tokens") or 0)
+            src = ev.get("data", {}).get("source") if isinstance(ev.get("data"), dict) else {}
+            model = str((src or {}).get("model") or "(未记录)") if isinstance(src, dict) else "(未记录)"
+            add_usage(snap.day(dte), reqs=1, fresh_in=fi, out=out, cache_read=rd,
+                      cache_write=cw, model=model, hour=local_hour(ep))
+            snap.sids.add(sid)
+            v4_reqs[sid] = v4_reqs.get(sid, 0) + 1
+            v4_tokens[sid] = v4_tokens.get(sid, 0) + fi + out + rd + cw
+            v4_last[sid] = max(v4_last.get(sid, 0.0), ep)
+            v4_model[sid] = model
+            if ep > (snap.last_seen or 0):
+                snap.last_seen = ep
+    for sid in v4_reqs:
+        add_session(snap, sid, reqs=v4_reqs[sid], tokens=v4_tokens[sid],
+                    model=v4_model.get(sid), last_seen=v4_last.get(sid) or None)
+    if not seen_usage:
+        snap.days.clear()
+        snap.sids.clear()
+        return snap.mark_unsupported("V4 会话无结构化 usage 字段，不伪造 token")
+    return snap.finish()
+
+
+def load(paths: Paths, rng: str, now: float | None = None, exclude_sids=None):
+    have = set(exclude_sids or ())
+    pc = _projcache(paths, rng, now, have)
+    v4 = _v4(paths, rng, now, have | set(pc.sids))
+    return [pc, v4]

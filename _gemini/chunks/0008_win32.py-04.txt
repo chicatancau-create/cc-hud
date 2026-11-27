@@ -1,0 +1,12 @@
+        # 取证时先把 alpha 临时设 100%，PrintWindow 出图干净。BitBlt 仅兜底。
+        ok, img = grab(True)
+        method = "PrintWindow"
+        extrema = img.convert("L").getextrema()
+        if not ok or extrema[1] <= 4:
+            ok2, img2 = grab(False)
+            if ok2 and img2.convert("L").getextrema()[1] > 4:
+                img, ok, method = img2, True, "BitBlt"
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        img.save(path)
+        return {"ok": bool(ok), "method": method, "w": w, "h": h,
+                "max_luma": img.convert("L").getextrema()[1], "path": str(path)}

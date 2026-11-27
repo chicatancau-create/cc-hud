@@ -1,0 +1,97 @@
+"""第 2 路：cc-haha（Claude Code 桌面壳）—— 索引库给成本，transcript 给本地日四项。"""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import time
+from pathlib import Path
+
+from ..model import SourceSnapshot, add_session, add_usage
+from ..paths import Paths, cchaha_index_and_projects
+from ..ranges import start_epoch
+from ..sqlite_ro import SourceReadError, SourceUnavailable, connect_ro, table_exists
+from .base import local_date, local_hour, sid_from_transcript
+
+_CACHE: dict[str, tuple] = {}
+_CACHE_MAX = 400
+
+
+def _parse_transcript(path: Path) -> dict[str, tuple]:
+    """message id -> (本地日, 秒, in, out, read, write, model)；保留最后一条 usage。"""
+    rows: dict[str, tuple] = {}
+    try:
+        fh = open(path, encoding="utf-8", errors="replace")
+    except OSError:
+        return rows
+    with fh:
+        for line in fh:
+            if '"usage"' not in line:
+                continue
+            try:
+                j = json.loads(line)
+            except ValueError:
+                continue
+            msg = j.get("message")
+            u = msg.get("usage") if isinstance(msg, dict) else None
+            if not isinstance(u, dict):
+                continue
+            mid = msg.get("id") or j.get("uuid") or ""
+            if not mid:
+                continue
+            try:
+                ep = dt.datetime.strptime((j.get("timestamp") or "")[:19],
+                                          "%Y-%m-%dT%H:%M:%S").replace(
+                    tzinfo=dt.timezone.utc).timestamp()
+            except ValueError:
+                continue
+            tools = [b.get("name") for b in (msg.get("content") or [])
+                     if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name")]
+            rows[mid] = (
+                local_date(ep), ep,
+                int(u.get("input_tokens") or 0),
+                int(u.get("output_tokens") or 0),
+                int(u.get("cache_read_input_tokens") or 0),
+                int(u.get("cache_creation_input_tokens") or 0),
+                str(msg.get("model") or "(未记录)"),
+                tools,
+            )
+    return rows
+
+
+def load(paths: Paths, rng: str, now: float | None = None, exclude_sids=None) -> SourceSnapshot:
+    snap = SourceSnapshot(key="cchaha", name="cc-haha", kind="session",
+                          note="索引成本按本地日 token 份额分摊 · 跨文件按 message id 去重")
+    idx, projects = cchaha_index_and_projects(paths)
+    if not idx or not projects or not Path(idx).exists():
+        return snap.mark_unsupported("未找到 cc-haha 索引库")
+    start = start_epoch(rng, now)
+    started = start is not None
+    start_day = local_date(start) if started else None
+    try:
+        with connect_ro(idx) as con:
+            if not table_exists(con, "activity_daily_models"):
+                return snap.mark_unsupported("索引库缺少 activity_daily_models")
+            cols = {r[1] for r in con.execute("pragma table_info(activity_daily_models)")}
+            s_day_cost: dict[tuple[str, str], float] = {}
+            if "date" in cols:
+                for tpath, dte, cost in con.execute(
+                        "select transcript_path, date, sum(cost_usd) "
+                        "from activity_daily_models group by 1,2"):
+                    sid = sid_from_transcript(Path(tpath))
+                    k = (sid, str(dte))
+                    s_day_cost[k] = s_day_cost.get(k, 0.0) + float(cost or 0.0)
+            else:
+                for tpath, cost in con.execute(
+                        "select transcript_path, sum(cost_usd) "
+                        "from activity_daily_models group by 1"):
+                    sid = sid_from_transcript(Path(tpath))
+                    k = (sid, "*")
+                    s_day_cost[k] = s_day_cost.get(k, 0.0) + float(cost or 0.0)
+    except SourceUnavailable as exc:
+        return snap.mark_unsupported(str(exc))
+    except SourceReadError as exc:
+        return snap.mark_error(str(exc))
+
+    paths_list = []
+    for dirpath, _dirs, files in os.walk(projects):

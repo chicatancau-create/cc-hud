@@ -1,0 +1,85 @@
+                                 "layout": layout, "theme": theme, "hollow": True},
+                                ensure_ascii=False), encoding="utf-8")
+    env["CC_HUD_STATE"] = str(state)
+    if size:                                      # 验证容器查询/窄窗兜底
+        env["CC_HUD_SIZE"] = size
+    try:
+        STATUS.unlink()
+    except OSError:
+        pass
+    pyw = ROOT / ".venv" / "Scripts" / "pythonw.exe"
+    proc = subprocess.Popen([str(pyw), str(ROOT / "cc-hud.pyw")], cwd=str(ROOT), env=env)
+    def ready_status():
+        d = read_status()
+        return d if d.get("ready") and d.get("hwnd") else None
+
+    data = wait_for(ready_status, 90)
+    if not data:
+        proc.kill()
+        raise RuntimeError("宿主未就绪（90s 内 runtime.json 未出现 ready+hwnd）")
+    return proc, data, state
+
+
+def stop(proc: subprocess.Popen, data: dict) -> None:
+    pid = data.get("pid")
+    if pid:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--layout", required=True, choices=["card", "insights", "diagnostics", "settings"])
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--theme", default="dark", choices=["dark", "light"])
+    ap.add_argument("--range", default="7d", choices=["1d", "7d", "30d", "all"])
+    ap.add_argument("--scroll", default="", help="逗号分隔的滚轮档数，如 3,6,9（正=向下）")
+    ap.add_argument("--settle", type=float, default=2.2, help="就绪后等待渲染的秒数")
+    ap.add_argument("--size", default="", help="覆盖窗口尺寸，如 900x760（默认走生产布局尺寸）")
+    args = ap.parse_args()
+
+    dpi_aware()
+    OUTDIR.mkdir(parents=True, exist_ok=True)
+    proc, data, state = launch(args.layout, args.theme, args.range, args.size)
+    hwnd = int(data["hwnd"])
+    shots: list[dict] = []
+    try:
+        user32.SetForegroundWindow(wt.HWND(hwnd))
+        time.sleep(args.settle)
+        rect = window_rect(hwnd)
+        notches_list = [0] + [int(x) for x in args.scroll.split(",") if x.strip()]
+        for idx, notches in enumerate(notches_list):
+            if notches:
+                cx, cy = (rect[0] + rect[2]) // 2, (rect[1] + rect[3]) // 2
+                send_wheel(cx, cy, notches)
+                time.sleep(0.7)
+            suffix = "" if idx == 0 else f"-s{notches}"
+            name = f"{args.out}{suffix}"
+            cap = WindowOps(hwnd).capture(OUTDIR / f"{name}.png")
+            desk = grab_desktop(window_rect(hwnd), OUTDIR / f"{name}-desk.png")
+            shots.append({"name": name, "scroll": notches, "printwindow": cap, "desktop": desk,
+                          "rect": list(window_rect(hwnd))})
+        doc = {"layout": args.layout, "theme": args.theme, "range": args.range,
+               "status": {k: data.get(k) for k in
+                          ("layout", "rect", "dpi", "dpr", "inner_width", "hollow_mode",
+                           "colorkey", "layered", "ready", "step_errors", "size_mismatch")},
+               "shots": shots, "state_file": str(state),
+               "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        (OUTDIR / f"{args.out}.json").write_text(json.dumps(doc, ensure_ascii=False, indent=2),
+                                                 encoding="utf-8")
+        print(json.dumps({"ok": all(s["printwindow"].get("ok") for s in shots),
+                          "layout": args.layout, "shots": [s["name"] for s in shots],
+                          "rect": doc["status"]["rect"], "hollow_mode": doc["status"]["hollow_mode"]},
+                         ensure_ascii=False))
+        return 0
+    finally:
+        stop(proc, read_status())
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

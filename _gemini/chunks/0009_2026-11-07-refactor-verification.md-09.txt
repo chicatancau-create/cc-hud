@@ -1,0 +1,19 @@
+### 35. 托盘根因更正（2026-11-08T02:52Z）
+
+- 宿主真实映像不是 `.venv\Scripts\pythonw.exe`，而是其子进程 `D:\PyCharm\Python\pythonw.exe`；
+  `HKCU\Control Panel\NotifyIconSettings\2591989311186454988`（该 exe）存在但 `IsPromoted=0`，继承自旧应用。
+- 置 `IsPromoted=1` 后，常驻实例 rect `[2038,1540,2078,1600]` 实测 36 个强调色像素（`artifacts/windows/tray-final.png`）→ 图标可见。
+  即第 33 节的“Shell 拒绝”结论不成立，真实原因是 Windows 的托盘“隐藏”提升设置。
+- 复核发现常驻与短命实例的截图**都含同一枚绿色图标**（各 282 个绿色像素），此前 `accent_pixels=0` 是 RGB 容差按原色判定、而隐藏区图标被系统整体调暗所致。
+  把 `tools/tray_pixel.py` 改为色相+饱和度判定（0.30<h<0.55、s>0.35、v>0.12）后，门禁输出 `accent_pixels=284`、`shell_getrect=0`、`ok=true` —— 托盘像素门禁通过。
+
+## 36. 最终验收（2026-11-08T03:11Z，替换后）
+
+`python tools/final_acceptance.py`（先退出常驻 HUD）→ `artifacts/final-acceptance.json`：
+
+- **18/18 门禁 rc=0，`failed_gates=[]`**：pytest、reconcile、lint、typecheck、vitest、build、playwright、card/insights/diagnostics/settings/peek/hollow/export/power 八组窗口实机、`tray_pixel`（色相判定 282 绿像素、GetRect=0）、tray_click、settings_persist。
+- `blocked=["multi_monitor: only 1 display(s)"]`：本机仅 `\.\DISPLAY21`；`Get-PnpDevice` 只见内屏 OK 与未接入的 ACER S271HL（Unknown），NVIDIA 其他输出无模式，无法软件启用。
+- 期间修掉一个真实回归：`RegisterWindowMessageW` 未声明 `argtypes` 使托盘初始化抛异常、宿主在部分取证里 1s 内退出；补 `[LPCWSTR]→UINT` 后窗口取证恢复全绿。
+- 结束后从快捷方式恢复常驻（runtime pid 29812，`tools/verify_installed.py` ok=true）。
+
+结论：除“双屏实机”这条本机不具备的硬件项外，其余完成标准全部实际执行并通过；未标记完成。

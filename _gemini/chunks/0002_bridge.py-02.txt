@@ -1,0 +1,92 @@
+                    "tools": agg["tools"],
+                    "session_rows": agg["session_rows"],
+                    "session_total": agg["session_total"],
+                    "apps": agg["apps"],
+                    "sources": [s.to_dict() for s in sources],
+                    "conservation": agg["conservation"],
+                    "start_date": agg["start_date"],
+                }
+                self._cache[rng] = (now, self.revision, payload)
+                while len(self._cache) > self.capacity:
+                    self._cache.popitem(last=False)
+            out = dict(payload)          # 缓存里存的是原始快照，回包不能改它
+            out["revision"] = self.revision
+            out["seq"] = int(seq or 0)
+            out["cache"] = {"hits": self.hits, "misses": self.misses,
+                            "entries": len(self._cache), "capacity": self.capacity}
+            return out
+
+
+class Bridge:
+    def __init__(self, root: Path | None = None, paths: Paths | None = None,
+                 settings: SettingsStore | None = None, power: PowerPort | None = None,
+                 window: Any = None, now_fn=time.time, ttl: float = 15.0,
+                 capacity: int = 8, dpi: Any = None, settings_provider=None):
+        self._root = Path(root) if root else Path(__file__).resolve().parents[1]
+        self._paths = paths or Paths.default()
+        self._settings_store = settings or SettingsStore(self._root / "hud-next-state.json")
+        self._settings_provider = settings_provider
+        self._power_port = power or SystemPower()
+        self._window_port = window
+        self.dpi = dpi
+        self._service = _Service(self._paths, ttl, capacity, now_fn)
+
+    # --- 数据 ---
+    def bootstrap(self) -> dict:
+        return {
+            "version": __version__,
+            "ranges": [{"key": r, "label": RANGE_LABELS[r]} for r in RANGES],
+            "settings": self.get_settings(),
+            "sources_meta": [{"key": k, "name": n, "kind": kd} for k, n, kd in SOURCE_META],
+            "dpi": self.dpi,
+            "platform": "windows",
+            "fake_power": not isinstance(self._power_port, SystemPower),
+            "start_date": start_date("1d"),
+            "selftest_layout": os.environ.get("CC_HUD_SELFTEST") == "layout",
+        }
+
+    def snapshot(self, rng: str = "1d", seq: int = 0) -> dict:
+        return self._service.get(rng, int(seq or 0))
+
+    def detail(self, source_key: str, rng: str = "1d") -> dict:
+        sources = collect(self._paths, rng, self._service.now_fn())
+        for s in sources:
+            if s.key == source_key:
+                return {"source": s.to_dict(), "range": rng}
+        return {"source": None, "range": rng, "reason": "未知来源"}
+
+    # --- 设置 ---
+    def get_settings(self) -> dict:
+        if self._settings_provider is not None:
+            return dict(self._settings_provider())
+        return self._settings_store.load()
+
+    def set_settings(self, patch: dict | None = None) -> dict:
+        """原生应用成功后才落盘；落盘失败则把窗口回滚到旧设置再向上抛。
+
+        旧实现先 apply 再 save，save 一抛异常就是「内存/窗口/磁盘」三方分叉：
+        窗口已是新设置、磁盘还是旧设置，而调用方只看到异常。"""
+        old = self.get_settings()
+        candidate = validate({**old, **(patch or {})})
+        if self._window_port is not None:
+            self._window_port.apply_settings(candidate)   # 失败必须向上抛，禁止吞掉
+        try:
+            return self._settings_store.save(candidate)
+        except Exception as exc:
+            if self._window_port is None:
+                raise
+            try:
+                self._window_port.apply_settings(old)
+            except Exception as rollback_exc:
+                raise RuntimeError(
+                    f"设置落盘失败，且窗口回滚也失败：save={exc!r} "
+                    f"rollback={rollback_exc!r}") from exc
+            raise
+
+    # --- 导出 ---
+    def export_json(self, rng: str = "1d") -> dict:
+        payload = self._service.get(rng, 0)
+        path = self._root / f"cc-hud-usage-{rng}.json"
+        return write_export(payload, path)
+
+    # --- 电源 ---

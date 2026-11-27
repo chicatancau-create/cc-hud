@@ -1,0 +1,14 @@
+        <DiagnosticsView snap={snap} settings={settings} range={range}
+          exportResult={exportResult} onExport={() => void doExport()}
+          onNavigate={(l) => navigate(l as NavLayout)} />
+      )}
+      {layout === "settings" && (
+        <SettingsView settings={settings} version={boot.version} onChange={(p) => applyQuiet(p)}
+          onExport={() => void doExport()}
+          onPower={(action, confirmed) => api.power(action, confirmed)}
+          onCancelPower={() => api.cancel_power()}
+          onNavigate={(l) => navigate(l as NavLayout)} />
+      )}
+    </div>
+  );
+}

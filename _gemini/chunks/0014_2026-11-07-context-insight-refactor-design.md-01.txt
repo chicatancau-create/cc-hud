@@ -1,0 +1,101 @@
+# Context Insight Refactor — Design Spec
+
+- 日期：2026-11-07
+- 主项目：`G:\cc-hud`（atomgit: zhoumoyukuai/cc-hud, main）
+- UI 参考：`bowenliang123/dsh-context` @ `6d55c2f26066610ff419b8cb7713bef865fb1093`
+- 状态：**重建版**。原 `docs/superpowers/specs/2026-11-07-context-insight-refactor-design.md`
+  在本地工作区、`atomgit`/`origin` 两个远端与全盘搜索中均不存在（见 `docs/superpowers/plans/…` 的取证记录）。
+  用户已授权：遇到阻碍按最合理方式继续。本文件由现有 `cchud/` 实现、`verify.py` 判据与本机真实数据
+  格式反推写成，不改变用户已确认的架构与约束。
+
+## 1. 目标
+
+把 Python/tkinter 的 `cc-hud` 重构为「React 18 + TypeScript + Vite 前端 + Python 3.14 + pywebview 6.2.1
++ Edge WebView2 宿主」，同时保留并强化原有能力：
+
+1. 小卡（常驻悬浮窗）沿用新视觉系统；
+2. 大面板高保真复刻 dsh-context 的 Context Insights 页面；
+3. 九路只读统计、统计守恒、双计防护；
+4. 托盘、呼出圆点、置顶、整窗透明度、DPI、多显示器、导出、电源动作；
+5. 修复 Codex 未回填、WorkBuddy 双版口径、模型统计与 SQLite 生命周期缺陷；
+6. 新增 DSH V4、cc-haha、Codex、WorkBuddy 本机只读会话适配器；
+7. 自动化测试 + Windows 实机验收 + 视觉差异报告。
+
+## 2. 非目标
+
+- 不改变「本地只读」性质：不联网取数、不上报、不读 API Key / `providers.json` / `settings_config`；
+- 不引入远程数据库、联网估价、远程采集、Harness 业务；
+- 不删除 `cc-hud.pyw` 回退入口，不删除 `cchud/` 既有功能；
+- 不做多用户、不做安装包签名分发。
+
+## 3. 架构
+
+```
+cc-hud-next.pyw                 # 新入口（pywebview 宿主）
+cchud_next/
+  paths.py                      # 所有数据源路径 + CC_HUD_HOME 覆盖（测试/沙箱）
+  model.py                      # DayUsage / SourceSnapshot / Snapshot 数据结构与序列化
+  ranges.py                     # 1d / 7d / 30d / all 的窗口计算（本地时区）
+  sqlite_ro.py                  # 只读连接上下文管理器（mode=ro + query_only + finally close）
+  sources/
+    base.py                     # Adapter 协议与状态枚举
+    ccswitch.py                 # 第 1 路：~/.cc-switch/cc-switch.db
+    cchaha.py                   # 第 2 路：索引库 + transcripts（本地日 + 全局去重）
+    qoder.py                    # 第 3/4 路：.qoder / .qoder-cn（credits-only）
+    zcode.py                    # 第 5 路：~/.zcode/cli/db/db.sqlite
+    herdsman.py                 # 第 6 路：~/.herdsman/model_stats/events.jsonl
+    codex.py                    # 第 7 路：~/.codex/sessions + archived_sessions
+    workbuddy.py                # 第 8 路：.workbuddy / .workbuddy-ai
+    dsh.py                      # 第 9 路：projcache totals + V4 zstd 会话
+  accounting.py                 # 合并、双计防护、守恒校验、模型聚合
+  settings.py                   # hud-next-state.json（校验/夹取/原子写）
+  bridge.py                     # pywebview js_api：快照/设置/导出/电源/窗口
+  win32.py                      # DPI、整窗 alpha、颜色键镂空、工作区/多屏
+  host.py                       # 窗口、托盘、圆点、刷新循环
+web/                            # React 18 + TS + Vite（file:// 加载 dist）
+  src/{api,state,views,components,styles}
+tests_py/                       # pytest
+web/src/**/*.test.ts(x)         # Vitest
+web/e2e/*.spec.ts               # Playwright（stub bridge）
+tools/verify_windows.py         # WebView2/窗口/托盘/圆点/DPI/多屏/PrintWindow 实机取证
+```
+
+### 3.1 运行方式
+
+- 生产：`pywebview.create_window(url=file:///<repo>/web/dist/index.html)`，`webview.start(http_server=False)`。
+- 禁止 `transparent=True`；整窗 alpha 走 Win32 `WS_EX_LAYERED + SetLayeredWindowAttributes(LWA_ALPHA)`。
+- 背景镂空（hollow）用 `LWA_COLORKEY`，单独列实机门禁，失败即回退为实色背景并记录。
+- DPI：进程启动即 `SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2)`；前端用 `devicePixelRatio` 自适应。
+
+## 4. 数据契约
+
+### 4.1 状态枚举（必须区分）
+
+| 状态 | 含义 | 前端显示 |
+|---|---|---|
+| `loading` | 请求在途（前端状态） | 骨架/“读取中” |
+| `ok` | 读取成功且有数据（允许真实 0 值） | 数值，0 就是 0 |
+| `empty` | 数据源存在，但当前范围无记录 | “本期无记录”，不画 0 |
+| `unsupported` | 来源存在但其格式不提供该维度（如 DSH V4 无结构化 usage）、或未安装 | “来源不支持/未安装” |
+| `error` | 读取失败（权限/损坏/被占用） | 错误原因，不冒充 0 |
+
+**禁止**：把 `empty`/`unsupported`/`error` 统一填 0。
+
+### 4.2 SourceSnapshot
+
+```json
+{
+  "key": "workbuddy",
+  "name": "WorkBuddy 国内",
+  "kind": "session",
+  "status": "ok",
+  "reason": null,
+  "note": "prompt 含缓存读写（均已拆出） · 本机不记钱",
+  "totals": {"reqs":0,"credits":0.0,"fresh_in":0,"out":0,"cache_read":0,
+             "cache_write":0,"cost":0.0,"tokens":0},
+  "days": {"2026-11-07": {"reqs":0,"credits":0.0,"fresh_in":0,"out":0,
+            "cache_read":0,"cache_write":0,"cost":0.0,"hours":[0,...24],
+            "models":{"m":{"reqs":0,"fresh_in":0,"out":0,"cache_read":0,"cache_write":0,"cost":0.0}}}},
+  "sessions": 0,
+  "last_seen": null,
+  "warnings": [],

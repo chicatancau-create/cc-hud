@@ -1,0 +1,87 @@
+import { render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import { stubSnapshot } from "../api/stub";
+import type { Settings, Snapshot } from "../types";
+import { CardView } from "./CardView";
+import { DiagnosticsView } from "./DiagnosticsView";
+import { InsightsView } from "./InsightsView";
+import { SettingsView } from "./SettingsView";
+
+const base = stubSnapshot("7d", 1);
+
+function emptySnap(): Snapshot {
+  return {
+    ...base,
+    status: "empty",
+    daily: [],
+    models: [],
+    apps: [],
+    totals: { reqs: 0, credits: 0, fresh_in: 0, out: 0, cache_read: 0, cache_write: 0, cost: 0, tokens: 0 },
+    kpis: { sessions: 0, active_days: 0, cost: null, tokens: 0, cache_hit: null, credits: null },
+    sources: base.sources.map((s) => ({ ...s, status: "empty" as const, reason: "本期无记录" }))
+  };
+}
+
+const settings: Settings = {
+  alpha: 0.96, topmost: true, peek: true, range: "7d", layout: "insights", theme: "dark", hollow: false
+};
+
+const noop = () => {};
+
+describe("InsightsView", () => {
+  it("渲染 KPI、九个来源卡与模型表", () => {
+    render(<InsightsView snap={base} range="7d" refreshing={false} onRange={noop}
+      onRefresh={noop} onExport={noop} onNavigate={noop} />);
+    expect(screen.getByTestId("insights")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "上下文洞察" })).toBeInTheDocument();
+    expect(document.querySelectorAll("article.source")).toHaveLength(base.sources.length);
+    const rows = screen.getByTestId("models-table").querySelectorAll("tbody tr");
+    expect(rows.length).toBeGreaterThan(0);
+  });
+
+  it("重要内容上移：tiles 只剩热力/工具/模型，检测卡下沉到数据来源之后", () => {
+    render(<InsightsView snap={base} range="7d" refreshing={false} onRange={noop}
+      onRefresh={noop} onExport={noop} onNavigate={noop} />);
+    const tiles = screen.getByTestId("insights").querySelector(".tiles")!;
+    expect(Array.from(tiles.children).map((n) => n.getAttribute("data-testid")))
+      .toEqual(["tile-heat", "tile-tools", "tile-models"]);
+    expect(screen.getByTestId("tile-models")).toHaveClass("wide");
+
+    const zone = screen.getByTestId("checks-zone");
+    expect(within(zone).getByTestId("tile-timing")).toBeInTheDocument();
+    expect(within(zone).getByTestId("tile-conservation")).toBeInTheDocument();
+
+    // DOM 顺序：会话 → 数据来源 → 底部检测区 → 页脚
+    const page = screen.getByTestId("insights");
+    const order = Array.from(page.children).map((n) => n.className);
+    const idxSessions = order.indexOf("sources-grid") >= 0 ? -1 : order.length;
+    void idxSessions;
+    const html = page.innerHTML;
+    expect(html.indexOf('data-testid="sessions"')).toBeLessThan(html.indexOf('data-testid="checks-zone"'));
+    expect(html.indexOf("数据来源")).toBeLessThan(html.indexOf('data-testid="checks-zone"'));
+    expect(html.indexOf('data-testid="checks-zone"')).toBeLessThan(html.indexOf("page-foot"));
+  });
+
+  it("守恒列表宽屏两列容器；动态数量与失败项都完整渲染", () => {
+    const many = {
+      ...base,
+      conservation: Array.from({ length: 33 }, (_, i) => ({
+        name: `check_${i}`, ok: i !== 7, detail: `detail ${i}`
+      }))
+    };
+    render(<InsightsView snap={many} range="7d" refreshing={false} onRange={noop}
+      onRefresh={noop} onExport={noop} onNavigate={noop} />);
+    const list = screen.getByTestId("tile-conservation").querySelector(".checks")!;
+    expect(list).toHaveClass("checks-2col");
+    const items = list.querySelectorAll("li");
+    expect(items).toHaveLength(33);
+    expect(list.querySelectorAll('li[data-ok="0"]')).toHaveLength(1);
+    // 数量来自数据，不是写死的 32
+    expect(screen.getByTestId("tile-conservation")).toHaveTextContent("1 项失败");
+  });
+
+  it("空数据用「本期无记录」且成本显示 —", () => {
+    render(<InsightsView snap={emptySnap()} range="7d" refreshing={false} onRange={noop}
+      onRefresh={noop} onExport={noop} onNavigate={noop} />);
+    expect(screen.getAllByText("本期无记录").length).toBeGreaterThan(0);

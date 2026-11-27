@@ -1,0 +1,68 @@
+               "prompt_tokens": 100, "completion_tokens": 10,
+               "prompt_cache_hit_tokens": 70, "prompt_cache_write_tokens": 20,
+               "credit": 1.25}}}
+    jlines(paths.workbuddy_sources[0][0] / "p" / "parent.jsonl", [rec])
+    jlines(paths.workbuddy_sources[1][0] / "p" / "parent.jsonl", [rec])
+    domestic, intl = workbuddy.load(paths, "1d")
+    assert domestic.totals()["fresh_in"] == 10
+    assert domestic.totals()["tokens"] == 110  # prompt 100 + completion 10
+    assert domestic.totals()["credits"] == 1.25
+    assert intl.totals()["credits"] == 0.0
+    assert "parent" in domestic.sids and "child-1" in domestic.sids
+    assert domestic.session_rows[0]["id"] == "parent"
+    assert domestic.session_rows[0]["tokens"] == 110
+
+
+def test_workbuddy_dedupes_copied_session_files(paths):
+    t = local_noon()
+    rec = {"timestamp": str(int(t * 1000)), "sessionId": "wb-1",
+           "providerData": {"model": "m", "rawUsage": {
+               "prompt_tokens": 10, "completion_tokens": 2,
+               "prompt_cache_hit_tokens": 4, "credit": 0.5}}}
+    jlines(paths.workbuddy_sources[0][0] / "p1" / "s.jsonl", [rec])
+    jlines(paths.workbuddy_sources[0][0] / "p2" / "s.jsonl", [rec])   # 复制副本
+    dom, _intl = workbuddy.load(paths, "1d")
+    assert dom.totals()["reqs"] == 1
+
+
+def test_dsh_projcache_turns_and_model(paths):
+    t = local_noon()
+    p = paths.dsh_projcache / "sid1.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"record": {
+        "identity": {"createdAt": int(t * 1000)},
+        "rows": {
+            "tokenUsage": {"val": {"totals": {"uncachedInputTokens": 11, "outputTokens": 7,
+                                              "cacheReadTokens": 90, "cacheWriteTokens": 0}}},
+            "sessionStats": {"val": {"turns": 3}},
+            "modelSelection": {"val": {"lastUsed": {"model": "deepseek-v4"}}},
+        }}}), encoding="utf-8")
+    (paths.dsh_projcache / "empty.json").write_text(json.dumps({"record": {
+        "identity": {"createdAt": int(t * 1000)},
+        "rows": {"tokenUsage": {"val": {"totals": {"uncachedInputTokens": 0, "outputTokens": 0,
+                                                  "cacheReadTokens": 0, "cacheWriteTokens": 0}}}},
+    }}), encoding="utf-8")
+    s = dsh.load(paths, "1d")
+    pc = [x for x in s if x.key == "dsh"][0]
+    assert pc.totals()["reqs"] == 3
+    assert pc.totals()["tokens"] == 108
+    assert pc.days[list(pc.days)[0]]["models"]["deepseek-v4"]["reqs"] == 3
+
+
+def test_dsh_v4_without_usage_is_unsupported(paths):
+    from compression import zstd
+
+    d = paths.dsh_sessions / "--proj--" / "uuid-1"
+    d.mkdir(parents=True)
+    lines = [
+        {"type": "session", "version": 4, "id": "uuid-1", "createdAt": int(local_noon() * 1000)},
+        {"type": "assistant/message", "time": int(local_noon() * 1000),
+         "data": {"message": {"role": "assistant", "content": []}, "source": {"model": "m"}}},
+    ]
+    (d / "session.v4.jsonl.zstd").write_bytes(
+        zstd.compress("\n".join(json.dumps(x) for x in lines).encode())
+    )
+    pc, v4 = dsh.load(paths, "1d")
+    assert v4.status == "unsupported"
+    assert "不伪造" in (v4.reason or "")
+    assert v4.totals()["tokens"] == 0

@@ -1,0 +1,56 @@
+结论：`failed_gates: []`；`blocked: ["multi_monitor: only 1 display(s)"]` → 脚本 rc=1 **仅因多屏阻塞**（本机只有一台显示器，按约定标注 blocked）。
+测试数量：pytest **114 passed**、vitest **29 passed**、playwright **13 passed**、reconcile 四段 `bad=none`。
+
+`tools/tray_click.py` 实测（全 true）：
+`ready / tray_added / tray_hwnd / initial_visible / no_dot_window / dot_created_false /
+hidden_after_click / stays_hidden_on_duplicate_message / right_click_opened_menu /
+right_click_keeps_hidden / menu_closed_after_escape / shown_after_second_click`
+
+`tools/verify_windows.py --hidden`：`visible=false`、`tray_available_when_hidden=true`、`no_dot_when_hidden=true`。
+
+## 6. 启动速度前后实测
+
+方法：`tools/bench_startup.py --rounds 5`；冷启动每轮先结束 HUD 并删除 profile 目录，
+热启动复用同一 profile；指标 = `Popen → runtime.json 中 ready=true`，取 5 轮中位数。
+改造前数据来自 `git worktree add ../cc-hud-baseline 2f96309`（`web/dist` 用同一份构建产物）。
+
+| 指标 | 改造前 | 改造后 | 变化 |
+|---|---|---|---|
+| 冷启动 ready 中位数 | **2283.0 ms** | **2028.1 ms** | −255 ms（−11.2%） |
+| 冷启动区间 | 2075.8 – 2536.7 | 1978.2 – 2333.9 | — |
+| 热启动 ready 中位数 | **2638.4 ms** | **1799.4 ms** | −839 ms（−31.8%） |
+| 热启动区间 | 2331.1 – 2839.4 | 1521.6 – 1976.8 | — |
+| 进程树进程数（冷） | 9 | 8 | −1 |
+| `msedgewebview2.exe` 数 | 7 | 6 | **−1（第二个 WebView2 窗口）** |
+| 整树私有内存（冷） | 248.2 MB | 239.4 MB | −8.8 MB |
+| `dot_created_seen` | `["True"]` | `["False"]` | 第二窗口确认消失 |
+
+确定有效的两项：① 删除第二窗口（进程树 9→8、WebView2 7→6，内存 −9MB）；
+② 启动器少一次 `import webview` + 少一个进程。耗时数字同机同服务波动较大（±200~400ms），
+故以中位数与区间共同呈现，不宣称单轮极值。
+
+## 7. 截图与证据位置
+
+`artifacts/windows/`：`ACCEPT-card.png`(530×412)、`ACCEPT-insights.png`(1475×1000)、
+`ACCEPT-diagnostics.png`(1350×950)、`ACCEPT-settings.png`(950×800)、
+`ACCEPT-hidden.png`（隐藏态：无圆点）、`ACCEPT-hollow.png`、`ACCEPT-power.png`、`ACCEPT-export.png`；
+`web/` Playwright 截图 `insights-density.png`（宽屏两列）、`narrow-checks.png`（窄屏单列）。
+JSON：`artifacts/final-acceptance.json`、`artifacts/windows-verify-*.json`、
+`artifacts/windows-verify-tray-click.json`、`artifacts/startup-bench-{before,after}.json`。
+
+## 8. 仍未解决 / 未验证
+
+1. **多显示器**：本机只有 1 屏，`verify_layout_switch` 的 `multi_monitor` 记为 **blocked**，未验证。
+2. **100% / 150% DPI**：系统固定 125%，`dpi96/dpi144` 是强制倍率模拟（通过），非真实系统缩放。
+3. **托盘菜单点击项选择**：`tray_click` 只验证“右键弹菜单且不改显隐 + ESC 收起”；
+   菜单项本身被点中的路径由单测（`test_tray_menu_pick_*`）与前端
+   `__cchudTrayMenu` 单测覆盖，未做真实鼠标点菜单项取证。
+4. **托盘图标在溢出面板中的可见性**：仍用 `tray_pixel.py` 的既有门禁（本次 rc=0），
+   未额外验证“Win11 折叠后在箭头面板内”的可见性。
+5. 启动耗时属本机同服务测量，不等于 CI 环境；波动大，仅报中位数与区间。
+
+## 9. git status 与本地提交
+
+改造前工作区干净（HEAD `2f96309`）。本次改动全部留在本地工作区，
+**未 commit、未 push**，符合目标中“可以在本地创建清晰 commit，但不要 push”的约束（本轮选择不提交）。
+`git status` 见交付时输出。

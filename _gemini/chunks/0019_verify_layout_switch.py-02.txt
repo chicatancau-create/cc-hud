@@ -1,0 +1,102 @@
+    state = Path(tempfile.mkdtemp(prefix="cchud-layout-state-")) / "state.json"
+    state.write_text(json.dumps({"alpha": 0.96, "topmost": True, "peek": True,
+                                 "range": "1d", "layout": "card", "theme": "dark",
+                                 "hollow": True}), encoding="utf-8")
+    env["CC_HUD_STATE"] = str(state)
+    try:
+        STATUS.unlink()
+    except OSError:
+        pass
+    pyw = ROOT / ".venv" / "Scripts" / "pythonw.exe"
+    proc = subprocess.Popen([str(pyw), str(ROOT / "cc-hud.pyw")], cwd=str(ROOT), env=env)
+    data = wait_for(lambda: (d := read_status()).get("hwnd") and d.get("targets") and d, 90)
+    if not data:
+        raise RuntimeError("宿主未就绪或未上报目标矩形")
+    return proc, data
+
+
+def stop(proc: subprocess.Popen, data: dict) -> None:
+    pid = data.get("pid")
+    if pid:
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True)
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def expected(layout: str, scale: float, work: tuple[int, int]) -> tuple[int, int]:
+    """按窗口缩放换算逻辑尺寸；宿主会同时夹到当前显示器工作区。"""
+    w, h = SIZES[layout]
+    w, h = int(w * scale), int(h * scale)
+    return min(w, max(200, work[0] - 16)), min(h, max(150, work[1] - 16))
+
+
+def run_chain(dpi: int | None, label: str, required: bool = True) -> dict:
+    proc, data = launch(dpi, label)
+    hwnd = int(data["hwnd"])
+    scale = (dpi or data.get("dpi") or 96) / 96.0
+    steps: list[dict] = []
+    observed: list[dict] = []
+
+    def window_rect() -> tuple[int, int, int, int]:
+        r = wt.RECT()
+        user32.GetWindowRect(wt.HWND(hwnd), ctypes.byref(r))
+        return (r.left, r.top, r.right, r.bottom)
+
+    def inside(x: int, y: int, pad: int = 2) -> bool:
+        l, t, r, b = window_rect()
+        return l + pad <= x < r - pad and t + pad <= y < b - pad
+
+    def send_wheel(x: int, y: int, notches: int) -> None:
+        """notches>0 向下滚（看下方内容）；用真实滚轮事件，不调 JS。"""
+        user32.SetCursorPos(int(x), int(y))
+        time.sleep(0.04)
+        delta = -120 if notches > 0 else 120
+        for _ in range(abs(notches)):
+            inp = INPUT(type=0, mi=MOUSEINPUT(0, 0, delta, MOUSEEVENTF_WHEEL, 0, 0))
+            user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+            time.sleep(0.03)
+
+    try:
+        user32.SetForegroundWindow(wt.HWND(hwnd))
+
+        def click_once(name: str) -> None:
+            """目标可能在页内滚动区下方：先真实滚轮滚到可见，再按钮式点击。"""
+            tgt = None
+            for _ in range(40):
+                tgt = (read_status().get("targets") or {}).get(name)
+                if tgt and inside(*tgt):
+                    break
+                if tgt:
+                    l, t, r, b = window_rect()
+                    cx = min(max(int(tgt[0]), l + 24), r - 24)
+                    send_wheel(cx, (t + b) // 2, 3 if tgt[1] > b else -3)
+                time.sleep(0.25)
+            else:
+                raise RuntimeError(f"{name} 滚动后目标仍不在窗口内 target={tgt} window={window_rect()}")
+            x, y = int(tgt[0]), int(tgt[1])
+            ok, how = hit_inside(hwnd, x, y)
+            if not ok:
+                raise RuntimeError(f"{name} 点击位置未命中主窗口 target=({x},{y}) window={window_rect()}")
+            cur = wt.POINT()
+            for _ in range(5):
+                user32.SetCursorPos(x, y)
+                time.sleep(0.1)
+                user32.GetCursorPos(ctypes.byref(cur))
+                if abs(cur.x - x) <= 2 and abs(cur.y - y) <= 2:
+                    break
+                user32.SetForegroundWindow(wt.HWND(hwnd))
+                time.sleep(0.2)
+            else:
+                raise RuntimeError(f"{name} 光标未到位 目标=({x},{y}) 实到=({cur.x},{cur.y})")
+            send_click(x, y)
+
+        def click(name: str, expect: str | None = None) -> None:
+            """真实点击；若布局未按预期切换，重发一次真实点击并如实记录。"""
+            click_once(name)
+            if expect is None:
+                return
+

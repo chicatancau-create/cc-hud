@@ -1,0 +1,32 @@
+        h = ctypes.windll.kernel32.OpenProcess(0x00100000, False, own_pid)  # SYNCHRONIZE
+        if h:
+            ctypes.windll.kernel32.WaitForSingleObject(h, 5000)
+            ctypes.windll.kernel32.CloseHandle(h)
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+    ok = all(c["ok"] for c in checks.values())
+    evidence = {
+        "layout": args.layout,
+        "ok": ok,
+        "checks": checks,
+        "runtime": data,
+        "monitors": mons,
+        "timestamp": time.time(),
+        "shot": str(shot),
+    }
+    out = ROOT / "artifacts" / f"windows-verify-{args.shot}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+    for name, c in checks.items():
+        print(f"[{'PASS' if c['ok'] else 'FAIL'}] {name}: {json.dumps(c['detail'], ensure_ascii=False)[:180]}")
+    print(f"evidence: {out}")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

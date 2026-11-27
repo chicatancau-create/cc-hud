@@ -1,0 +1,90 @@
+                            ev = _sysw.TRAY_EVT.get(lp & 0xFFFF)
+                            if ev and self._accept(ev):
+                                host._on_tray(ev)
+                            return 1
+                    except Exception as exc:
+                        host.status["tray_error"] = repr(exc)
+                        return 0
+                    return _ct.windll.user32.DefWindowProcW(h, msg, wp, lp)
+
+            self.tray = _SyncTray(self.events)
+            self.tray.set(True, "cc-hud · 显示中")
+            self.status["tray_added"] = bool(self.tray.added)
+            self.status["tray_hwnd"] = int(self.tray.hwnd) if self.tray.hwnd else None
+            self.status["tray_uid"] = int(self.tray.nid.uID)
+            self.status["tray_getrect_rc"] = getattr(self.tray, "getrect_rc", None)
+            self.status["tray_rect"] = getattr(self.tray, "getrect", None)
+        except Exception as exc:
+            self.status["tray_added"] = False
+            self.status["tray_error"] = repr(exc)
+            # 托盘建不起来就不能让面板消失；此时保持可见并给出可见的错误提示
+            self.status["last_error"] = f"托盘注册失败：{exc!r}"
+
+    def _on_tray(self, ev: str) -> None:
+        if ev == "toggle":
+            self.hide() if not self.hidden else self.show()
+            return
+        if ev == "menu":
+            # 右键只弹菜单，绝不顺带切换显隐
+            if self.tray is None:
+                self.status["tray_error"] = "右键菜单不可用：托盘未建立"
+                return
+            # 先记账再弹：TrackPopupMenu 是模态循环，验收要靠这个计数判断菜单确实弹出过
+            self.status["tray_menu_shown"] = int(self.status.get("tray_menu_shown", 0)) + 1
+            self.status["tray_menu_phase"] = "opening"
+            self._write_status()
+            try:
+                picked = self.tray.popup(self.menu_items())
+            except Exception as exc:
+                self.status["tray_error"] = repr(exc)
+                self.status["tray_menu_phase"] = "error"
+                return
+            self.status["tray_menu_phase"] = "closed"
+            self.status["tray_menu_picked"] = picked
+            if picked:
+                # 优先让前端执行：前端右键菜单与托盘必须走同一条分发逻辑。
+                # 前端不在（页面已销毁）时才由宿主直接兜底执行。
+                js = ("window.__cchudTrayMenu ? (window.__cchudTrayMenu(%s), true) : false"
+                      % json.dumps(picked))
+                try:
+                    handled = bool(self.window.evaluate_js(js)) if self.window else False
+                except Exception:
+                    handled = False
+                if not handled:
+                    out = self.run_menu(picked)
+                    self.status["tray_menu_result"] = out
+                    self._write_status()
+                self.status["tray_menu_via"] = "frontend" if handled else "host"
+
+    def _tray_loop(self) -> None:
+        """兼容旧调用方；托盘事件现在走 WndProc（GUI 线程）同步处理。"""
+        while self._alive:
+            try:
+                ev = self.events.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            self._on_tray(ev)
+
+    def _log(self, msg: str) -> None:
+        try:
+            p = self.root / "artifacts" / "host.log"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "a", encoding="utf-8") as fh:
+                fh.write(time.strftime("%H:%M:%S ") + msg + "\n")
+        except OSError:
+            pass
+
+    def _write_status(self) -> None:
+        """原子写状态文件：同目录 mkstemp + os.replace，一把写锁串行化。
+
+        GUI / js_api / worker 三类线程都会调这里；旧实现用固定的 runtime.tmp，
+        并发时两个线程互相截断同一个 tmp 文件，读侧会读到半截 JSON。
+        json.dumps 失败（不可序列化对象、并发改动导致 dict size changed）也要记账，
+        不能只捕 OSError 然后静默。落盘经 _replace_with_retry：目标文件被另一个 HUD
+        进程短暂占用时重试几次，仍失败才记 status_write_error。
+        """
+        path = Path(getattr(self, "status_path", STATUS_PATH))
+        with _STATUS_WRITE_LOCK:
+            try:
+                data = json.dumps(dict(self.status), ensure_ascii=False, indent=2)
+            except (TypeError, ValueError, RuntimeError) as exc:

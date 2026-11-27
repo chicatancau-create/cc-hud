@@ -1,0 +1,111 @@
+import json
+import sqlite3
+
+from cchud_next.sources import (
+    cchaha,
+    ccswitch,
+    codex,
+    dsh,
+    herdsman,
+    qoder,
+    workbuddy,
+    zcode,
+)
+
+from conftest import iso_utc, jlines, local_noon, write_ccswitch
+from cchud_next.sources.base import local_date
+
+
+def test_ccswitch_net_input_and_cost(paths):
+    t = local_noon()
+    write_ccswitch(paths, [
+        (t, 0.10, 100, 10, 50, 5, "proxy", "s1", "claude-sonnet"),
+        (t + 60, 0.20, 40, 4, 60, 0, "codex_session", "s2", "gpt-5"),
+    ])
+    s = ccswitch.load(paths, "1d")
+    t0 = s.totals()
+    # 汇总口径：Σinput - Σcodex_session.cache_read = 140 - 60
+    assert t0["fresh_in"] == 80
+    assert t0["out"] == 14
+    assert t0["cache_read"] == 110
+    assert t0["cache_write"] == 5
+    assert t0["cost"] == 0.30000000000000004
+    assert s.totals()["tokens"] == 80 + 14 + 110 + 5
+    assert s.sids == {"s1", "s2"}
+    rows = {r["id"]: r for r in s.session_rows}
+    assert s.timing is not None and s.timing["n"] == 0  # 夹具未写延迟列值
+    assert rows["s1"]["reqs"] == 1 and rows["s1"]["tokens"] == 165
+    assert rows["s2"]["tokens"] == 44
+
+
+def test_ccswitch_timing_percentiles(paths):
+    import sqlite3
+
+    t = local_noon()
+    write_ccswitch(paths, [
+        (t, 0.1, 100, 10, 50, 5, "proxy", "s1", "m"),
+        (t + 60, 0.1, 100, 10, 50, 5, "proxy", "s2", "m"),
+    ])
+    con = sqlite3.connect(paths.ccswitch_db)
+    con.execute("update proxy_request_logs set latency_ms=1000, first_token_ms=200 where session_id='s1'")
+    con.execute("update proxy_request_logs set latency_ms=3000, first_token_ms=600 where session_id='s2'")
+    con.commit(); con.close()
+    s = ccswitch.load(paths, "1d")
+    assert s.timing["n"] == 2
+    assert s.timing["p50"] == 3000 and s.timing["p95"] == 3000
+    assert s.timing["ftt_p50"] == 600
+
+
+def test_ccswitch_missing_db_is_unsupported(paths):
+    assert ccswitch.load(paths, "1d").status == "unsupported"
+
+
+def test_cchaha_global_dedupe_and_local_cost_split(home, paths):
+    cfg = home / ".claude" / "cc-haha"
+    (cfg / "db").mkdir(parents=True)
+    projects = home / ".claude" / "projects"
+    msg = {
+        "timestamp": iso_utc(local_noon()),
+        "message": {"id": "m1", "model": "claude-x",
+                    "content": [{"type": "tool_use", "name": "Read"},
+                                {"type": "tool_use", "name": "Bash"}],
+                    "usage": {"input_tokens": 10, "output_tokens": 5,
+                              "cache_read_input_tokens": 100,
+                              "cache_creation_input_tokens": 2}},
+    }
+    jlines(projects / "sid-a.jsonl", [msg])
+    jlines(projects / "sid-b.jsonl", [msg])  # fork 抄写同一 message
+    db = cfg / "db" / "index-v1.sqlite"
+    con = sqlite3.connect(db)
+    con.execute("create table activity_daily_models (transcript_path text, date text, cost_usd real)")
+    con.execute("insert into activity_daily_models values (?,?,?)", (str(projects / "sid-a.jsonl"), local_date(local_noon()), 2.0))
+    con.commit()
+    con.close()
+
+    s = cchaha.load(paths, "7d")
+    assert s.totals()["reqs"] == 1
+    assert s.totals()["fresh_in"] == 10
+    assert s.totals()["cache_read"] == 100
+    assert abs(s.totals()["cost"] - 2.0) < 1e-9
+    assert s.sids == {"sid-a", "sid-b"}
+    tools = {t["name"]: t["n"] for t in s.to_dict()["tools"]}
+    assert tools == {"Read": 1, "Bash": 1}
+
+
+def test_cchaha_cost_stays_on_its_day(home, paths):
+    """会话跨两天时，索引里的当日成本不能摊到另一天。"""
+    cfg = home / ".claude" / "cc-haha"
+    (cfg / "db").mkdir(parents=True)
+    projects = home / ".claude" / "projects"
+    now = local_noon()
+    yday = now - 86400
+    msgs = []
+    for i, t in enumerate((yday, now)):
+        msgs.append({
+            "timestamp": iso_utc(t),
+            "message": {"id": f"m{i}", "model": "claude-x", "content": [],
+                        "usage": {"input_tokens": 10, "output_tokens": 0}},
+        })
+    jlines(projects / "sid-c.jsonl", msgs)
+    db = cfg / "db" / "index-v1.sqlite"
+    con = sqlite3.connect(db)

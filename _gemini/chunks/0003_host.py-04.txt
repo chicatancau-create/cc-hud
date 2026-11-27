@@ -1,0 +1,97 @@
+                    sender.Stop()
+                    sender.Dispose()
+            except Exception:
+                try:
+                    sender.Stop()
+                except Exception:
+                    pass
+
+        timer = Timer()
+        timer.Interval = 40
+        timer.Tick += tick
+        self._rect_guard = timer
+        timer.Start()
+        # 不做 CSS zoom：整页按设备像素比自然铺满，避免缩小后留下可穿透的透明带
+
+
+    TARGET_SELECTORS = {
+        "expand": '[data-testid="expand-insights"]',
+        "range7": '[data-testid="range-7d"]',
+        "collapse": '[data-testid="collapse-card"]',
+        "diagnostics": '[data-testid="nav-diagnostics"]',
+        "settings": '[data-testid="nav-settings"]',
+        "insights": '[data-testid="nav-insights"]',
+        "card": '[data-testid="nav-card"]',
+    }
+
+    def _refresh_targets(self) -> None:
+        if os.environ.get("CC_HUD_SELFTEST") != "layout" or not self.window or not self.ops:
+            return
+        out = {}
+        try:
+            ox, oy = self.ops.client_origin()
+        except Exception as exc:
+            self.status["targets_error"] = repr(exc)
+            return
+        for name, sel in self.TARGET_SELECTORS.items():
+            js = ("(function(){var e=document.querySelector(%r);if(!e)return null;"
+                  "var r=e.getBoundingClientRect();return [r.left+r.width/2,r.top+r.height/2];})()" % sel)
+            try:
+                v = self.window.evaluate_js(js)
+            except Exception as exc:
+                self.status["targets_error"] = repr(exc)
+                v = None
+            if v:
+                out[name] = [int(ox + v[0]), int(oy + v[1])]
+        if out:
+            self.status["targets"] = out
+
+    def command(self, action: str, value=None) -> dict:
+        if action == "show":
+            self.show()
+            return {"ok": True}
+        if action == "hide":
+            self.hide()
+            return {"ok": True}
+        if action == "toggle":
+            self.hide() if not self.hidden else self.show()
+            return {"ok": True, "hidden": self.hidden}
+        if action == "alpha":
+            ok = bool(self.ops and self.ops.set_alpha(float(value)))
+            return {"ok": ok, "value": value}
+        if action == "topmost":
+            ok = bool(self.ops and self.ops.set_topmost(bool(value)))
+            return {"ok": ok, "value": value}
+        if action == "hollow":
+            if not self.ops:
+                return {"ok": False, "reason": "无窗口"}
+            cand = dict(self.settings, hollow=bool(value))
+            self._run_on_gui(self._apply_effects, cand)
+            self.settings = cand
+            self.status["colorkey"] = False
+            self._write_status()
+            return {"ok": True, "value": bool(value), "colorkey": use_colorkey(cand)}
+        if action == "place":
+            if not self.ops:
+                return {"ok": False, "reason": "无窗口"}
+            res = dict(self.ops.place(None, None, int(value or 0)))
+            # "ok" 保持命令层原义（已受理）；SetWindowPos 的真实结果另记 place_ok/err
+            res.update({"ok": True, "place_ok": bool(res.get("ok", True))})
+            return res
+        if action == "capture":
+            if not self.ops:
+                return {"ok": False, "reason": "无窗口"}
+            return self.ops.capture(safe_capture_path(self.root, value))
+        if action == "dpi":
+            return {"ok": True, "dpi": dpi_for_window(self.ops.hwnd if self.ops else 0)}
+        if action == "selftest_result":
+            self.status["selftest_result"] = value
+            self._log(f"selftest_result {value}")
+            self._write_status()
+            return {"ok": True}
+        if action == "layout_targets":
+            if os.environ.get("CC_HUD_SELFTEST") != "layout":
+                return {"ok": False, "reason": "selftest 未开"}
+            try:
+                payload = json.loads(value) if isinstance(value, str) else dict(value or {})
+                ox, oy = self.ops.client_origin() if self.ops else (0, 0)

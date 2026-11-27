@@ -1,0 +1,59 @@
+        <p className="dim">来自 cc-haha transcript 的只读解析；该范围内没有工具调用，或对应会话尚未写入 transcript。</p>
+      </div>
+    );
+  }
+  const max = Math.max(1, ...snap.tools.map((t) => t.n));
+  return (
+    <ul className="app-list" data-testid="tools-card">
+      {snap.tools.map((t) => (
+        <li key={t.name}>
+          <span className="app-name mono" title={t.name}>{t.name}</span>
+          <span className="app-track accent"><i style={{ width: `${(t.n / max) * 100}%` }} /></span>
+          <b>{fmtCount(t.n)}</b>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export function TimingCard({ snap }: { snap: Snapshot }) {
+  const t = snap.timing;
+  if (!t) return <div className="empty-note">无耗时数据（代理日志缺少 latency 列）</div>;
+  const share = t.p50 && t.ftt_p50 ? Math.min(100, (t.ftt_p50 / t.p50) * 100) : null;
+  const R = 42;
+  const C = 2 * Math.PI * R;
+  const dash = share === null ? 0 : (share / 100) * C;
+  return (
+    <div className="timing-wrap" data-testid="timing-card">
+      <div className="donut-box small">
+        <svg viewBox="0 0 100 100" className="donut" role="img" aria-label="首 token 占时">
+          <circle cx="50" cy="50" r={R} fill="none" stroke="var(--track)" strokeWidth="10" />
+          {share !== null && (
+            <circle cx="50" cy="50" r={R} fill="none" stroke="var(--c-in)" strokeWidth="10"
+              strokeDasharray={`${dash} ${C - dash}`} strokeDashoffset={0}
+              transform="rotate(-90 50 50)" />
+          )}
+        </svg>
+        <div className="donut-center">
+          <b>{share === null ? "—" : `${share.toFixed(0)}%`}</b>
+          <span>首 token</span>
+        </div>
+      </div>
+      <ul className="timing-rows">
+        <li><span>请求 P50</span><b>{t.p50 === null ? "—" : `${(t.p50 / 1000).toFixed(2)}s`}</b></li>
+        <li><span>请求 P95</span><b>{t.p95 === null ? "—" : `${(t.p95 / 1000).toFixed(2)}s`}</b></li>
+        <li><span>首 token P50</span><b>{t.ftt_p50 === null ? "—" : `${(t.ftt_p50 / 1000).toFixed(2)}s`}</b></li>
+        <li><span>样本</span><b>{fmtCount(t.n)} / {fmtCount(t.ftt_n)}</b></li>
+      </ul>
+    </div>
+  );
+}
+
+export function CacheHint({ snap }: { snap: Snapshot }) {
+  return (
+    <span className="dim cache-hint" data-testid="cache-hint">
+      rev {snap.revision} · 快照缓存 {snap.cache.entries}/{snap.cache.capacity}（命中 {snap.cache.hits} / 未命中 {snap.cache.misses}）
+      {snap.kpis.cache_hit === null ? "" : ` · 命中率 ${fmtPct(snap.kpis.cache_hit)}`}
+    </span>
+  );
+}

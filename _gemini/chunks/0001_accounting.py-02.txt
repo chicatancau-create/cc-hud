@@ -1,0 +1,100 @@
+            "date": date,
+            "reqs": int(d["reqs"]),
+            "tokens": token_total(d),
+            "cost": float(d["cost"]),
+            "fresh_in": int(d["fresh_in"]),
+            "out": int(d["out"]),
+            "cache_read": int(d["cache_read"]),
+            "cache_write": int(d["cache_write"]),
+            "credits": float(d["credits"]),
+        })
+
+    hourly = []
+    for hh in range(24):
+        reqs = sum(int(d["hours"][hh]) for d in days.values())
+        # 小时级 token/成本未按来源拆分；保持 0，不伪造分布
+        hourly.append({"hour": hh, "reqs": reqs, "tokens": 0, "cost": 0.0})
+
+    models: dict[str, dict] = {}
+    for s in included:
+        for d in s.days.values():
+            for name, m in d["models"].items():
+                e = models.setdefault(name, {"name": name, "reqs": 0, "tokens": 0,
+                                             "cost": 0.0, "sources": []})
+                e["reqs"] += int(m.get("reqs") or 0)
+                e["tokens"] += token_total(m)
+                e["cost"] += float(m.get("cost") or 0.0)
+                if s.key not in e["sources"]:
+                    e["sources"].append(s.key)
+    model_rows = sorted(models.values(), key=lambda x: (-x["tokens"], -x["reqs"], x["name"]))[:12]
+
+    apps = []
+    for s in included:
+        t = s.totals()
+        apps.append({"key": s.key, "name": s.name, "reqs": t["reqs"],
+                     "tokens": t["tokens"], "cost": t["cost"]})
+    apps.sort(key=lambda x: (-x["tokens"], x["name"]))
+
+    timing = next((s.timing for s in included if s.timing), None)
+    tools: dict[str, dict] = {}
+    for src in included:
+        for k, v in src.tool_counts.items():
+            e = tools.setdefault(k, {"name": k, "n": 0, "sessions": 0})
+            e["n"] += v["n"]
+            e["sessions"] += len(v["sessions"])
+    session_rows: list[dict] = []
+    for src in included:
+        session_rows.extend(src.session_rows)
+    session_rows.sort(key=lambda r: (-int(r.get("tokens") or 0), str(r.get("id") or "")))
+
+    denom = totals["cache_read"] + totals["fresh_in"] + totals["cache_write"]
+    kpis = {
+        "sessions": sum(int(s.sessions or 0) for s in included),
+        "active_days": len(days),
+        "cost": totals["cost"] if total_cost_supported else None,
+        "tokens": totals["tokens"],
+        "cache_hit": (totals["cache_read"] / denom * 100.0) if denom else None,
+        "credits": totals["credits"] if total_credits_supported else None,
+    }
+
+    return {
+        "totals": totals,
+        "kpis": kpis,
+        "daily": daily,
+        "hourly": hourly,
+        "models": model_rows,
+        "apps": apps,
+        "timing": timing,
+        "tools": sorted(tools.values(), key=lambda x: -x["n"])[:12],
+        "session_rows": session_rows[:200],
+        "session_total": len(session_rows),
+        "conservation": conservation(sources, totals, days),
+        "range": rng,
+        "start_date": start_date(rng, now),
+    }
+
+
+def conservation(sources: list[SourceSnapshot], totals: dict,
+                 days: dict | None = None) -> list[dict]:
+    checks: list[dict] = []
+
+    def add(name: str, ok: bool, detail: str) -> None:
+        checks.append({"name": name, "ok": bool(ok), "detail": detail})
+
+    if days is not None:
+        s = {k: 0 for k in ("reqs", "fresh_in", "out", "cache_read", "cache_write")}
+        for d in days.values():
+            for k in s:
+                s[k] += int(d[k])
+        add("totals_eq_days", all(totals[k] == s[k] for k in s),
+            "合计 == Σ按天：" + ", ".join(f"{k}={totals[k]}" for k in s))
+        tokens_ok = totals["tokens"] == sum(s[k] for k in ("fresh_in", "out", "cache_read", "cache_write"))
+        add("tokens_eq_parts", tokens_ok, f"tokens={totals['tokens']}")
+
+    for src in sources:
+        if src.suppressed or src.status != STATUS_OK:
+            continue
+        t = src.totals()
+        sd = {k: 0 for k in ("reqs", "fresh_in", "out", "cache_read", "cache_write")}
+        hours = 0
+        for d in src.days.values():

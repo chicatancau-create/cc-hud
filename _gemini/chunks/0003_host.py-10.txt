@@ -1,0 +1,89 @@
+        self.status["dist"] = DIST.as_uri()
+        self.status["dot_created"] = False
+        self.status["main_created"] = self.window is not None
+        self.status["bench"] = bench_marks()
+        self._write_status()
+        threading.Thread(target=self._watch_ccswitch, daemon=True).start()
+
+    def _watch_ccswitch(self) -> None:
+        """CC Switch 退出 -> HUD 跟随退出（启动时没见到 CC Switch 则不自杀）。"""
+        from .tray import ccswitch_pid
+
+        seen = False
+        misses = 0
+        while self._alive:
+            time.sleep(5.0)
+            if not self._alive:
+                return
+            if ccswitch_pid():
+                seen = True
+                misses = 0
+                continue
+            if not seen:
+                continue
+            misses += 1
+            if misses >= 2:          # 10 秒宽限，避免 CC Switch 重启瞬间误杀
+                self._log("ccswitch gone -> quit")
+                self.status["quit_reason"] = "ccswitch_gone"
+                self._write_status()
+                self._schedule_on_gui(self._quit_quiet)
+                return
+
+    def _quit_quiet(self) -> None:
+        try:
+            if self.window:
+                self.window.destroy()
+        except Exception as exc:
+            self.status["last_error"] = f"quit: {exc!r}"
+
+    def _wait_hwnd(self) -> None:
+        """HWND 轮询兜底（loaded 事件可能漏发）；宿主建成即退出。
+
+        宿主段失败（例如拿不到 HWND）时继续轮询重试——旧代码调一次就 return，
+        和注释里「还能重试」的说法不符。"""
+        for _ in range(150):
+            if not self._alive:
+                return
+            try:
+                native = self.window.native if self.window else None
+                if native is not None and hasattr(native, "Handle"):
+                    hwnd = int(native.Handle.ToInt64())
+                    if hwnd:
+                        self._log(f"hwnd ready {hwnd}")
+                        self._ensure_window_ready()
+                        if self._initialized:
+                            return
+                        time.sleep(0.5)   # 宿主段失败：退避后再试，别 0.1s 刷屏
+                        continue
+            except Exception:
+                pass
+            time.sleep(0.1)
+        self._log("hwnd wait timeout")
+        self.status["last_error"] = "hwnd wait timeout"
+        self._write_status()
+
+    def _on_closed(self) -> None:
+        self._alive = False
+        try:
+            if self.tray:
+                self.tray.quit()
+        except Exception:
+            pass
+        for w in (self.window,):
+            try:
+                if w:
+                    w.destroy()
+            except Exception:
+                pass
+
+
+def main() -> None:
+    from .tray import already_running
+
+    if already_running():
+        return
+    Host().run()
+
+
+if __name__ == "__main__":
+    main()

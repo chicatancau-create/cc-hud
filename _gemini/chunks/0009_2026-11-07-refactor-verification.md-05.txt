@@ -1,0 +1,85 @@
+  即第 33 节的“Shell 拒绝”结论不成立，真实原因是 Windows 的托盘“隐藏”提升设置。
+- 复核发现常驻与短命实例的截图**都含同一枚绿色图标**（各 282 个绿色像素），此前 `accent_pixels=0` 是 RGB 容差按原色判定、而隐藏区图标被系统整体调暗所致。
+  把 `tools/tray_pixel.py` 改为色相+饱和度判定（0.30<h<0.55、s>0.35、v>0.12）后，门禁输出 `accent_pixels=284`、`shell_getrect=0`、`ok=true` —— 托盘像素门禁通过。
+# cc-hud 重构验证报告（2026-11-07）
+
+> 说明：本报告的每个数字与结论都来自本轮实际命令输出；未执行/未证实的项目单列在 §7「未验证与限制」，不以“通过”代替。
+
+## 0. 执行依据文档缺失与重建
+
+用户指定的两份文档在本地与两个远端均不存在：
+
+- `git ls-files` 无 docs；`git rev-list --left-right --count main...atomgit/main` = `0 0`（`991521d`）；
+- `git ls-remote https://atomgit.com/zhoumoyukuai/cc-hud.git` 仅 `main@991521d`；
+- `raw.gitcode.com/.../docs/...` → HTTP 404；全盘文件名/内容搜索 0 命中。
+
+用户补充指令「遇到阻碍按最合理方式继续」，因此：
+本报告所依据的 spec/plan 为**重建版**（见 `docs/superpowers/specs/…design.md`、`docs/superpowers/plans/…refactor.md` 顶部标注），
+内容由现有 `cchud/`、`verify.py` 与本机真实数据格式反推，未改变已确认的 React + pywebview 架构与硬约束。
+
+## 1. 环境实测
+
+| 项 | 结果 |
+|---|---|
+| Python | 3.14.2（`D:\PyCharm\Python\python.exe`） |
+| 项目 venv | `.venv`（pytest 9.2.0、pywebview 6.2.1、Pillow 13.0.0） |
+| Node / npm | 24.15.0 / 11.12.1 |
+| Edge / WebView2 | Edge 存在；运行时 156.0.4314.58、157.0.4341.42 |
+| 显示 | 2560×1540 工作区，125%（DPI 120），1 台显示器 |
+
+## 2. 交付物
+
+```
+cchud_next/            新宿主包（paths/model/ranges/sqlite_ro/sources/accounting/settings/export/bridge/win32/host）
+web/                   React 18 + TS + Vite（小卡 / 洞察 / 诊断 / 设置）
+cc-hud-next.pyw        新入口（file:// + http_server=False）
+start-hud-next.bat     新启动器（.venv\Scripts\pythonw.exe）
+cc-hud.pyw, cchud/     旧版原样保留（回退入口）
+tests_py/              61 个 pytest 用例
+web/src/**/*.test.*    16 个 Vitest 用例
+web/e2e/               10 个 Playwright 用例
+tools/verify_windows.py  Windows 实机取证
+docs/superpowers/…     重建的 spec + 17 任务 plan
+docs/reports/…         本报告
+artifacts/             截图与实机 JSON 证据
+```
+
+## 3. 自动化门禁（实际执行）
+
+| 命令 | 结果 |
+|---|---|
+| `.venv/Scripts/python.exe -m pytest tests_py -q` | **64 passed** |
+| `cd web && npm run typecheck` | 0 error |
+| `cd web && npm run lint` | 0 error |
+| `cd web && npm test` | **16 passed** |
+| `cd web && npm run build` | 成功（`dist/index-*.js` ≈181 kB，gzip 57 kB） |
+| `cd web && npx playwright test` | **10 passed**（chromium channel=msedge，含刷新后 seq 回归） |
+| `python tools/verify_windows.py --layout card --wait 26` | `ok=true`（17 项全 PASS） |
+| `python tools/verify_windows.py --layout insights --wait 26` | `ok=true` |
+| `python tools/verify_windows.py --layout card --hidden --wait 8` | `ok=true`（含 peek 可见/截图） |
+| `python tools/verify_windows.py --layout diagnostics --wait 26` | `ok=true`（`FINAL-diagnostics.png`） |
+| `python tools/verify_windows.py --layout settings --wait 26` | `ok=true`（`FINAL-settings.png`） |
+| `python tools/verify_windows.py --layout insights --wait 26 --scroll 1150` | `ok=true`（会话网格截图 `FINAL2-sessions2.png`） |
+| `python tools/verify_windows.py --layout card --hollow --wait 26` | `ok=true`；`flags=3`、`bg_pixels=0/379555`（`FINAL-hollow3.png`） |
+| `python tools/verify_windows.py --layout card --selftest power --wait 20` | `ok=true`；未确认拒绝、确认后走**假执行器**（无真实关机） |
+| `python tools/verify_windows.py --layout card --selftest export --wait 40` | `ok=true`；`selftest_export: {"path":"…\cc-hud-usage-1d.json","bytes":26104,"revision":1}` |
+
+Python 用例覆盖：模型/状态区分、只读 SQLite（写被拒、异常路径关库）、9 路适配器（cc-haha 全局去重、
+Qoder credits、ZCode 净输入、牧羊人、Codex have_sids、WorkBuddy 双版、DSH projcache/V4）、
+整路拒绝与只计缺口、守恒校验、设置夹取与原子写、导出 revision/脱敏、桥接 latest-wins/缓存上限/电源二次确认。
+
+前端用例覆盖：null vs 0、suppressed 文案、latest-wins 丢弃乱序、缓存容量淘汰、四态文案、KPI/来源卡/模型表、
+诊断守恒表、设置二次确认、小卡导航。
+
+Playwright 覆盖：洞察渲染、连续范围切换（今日→30 天→全部→7 天，最终 7 根日柱）、小卡↔设置↔洞察、
+诊断（11 路来源、0 条守恒失败）、电源两次确认、空/零/不支持/错误四态、导出 revision、
+会话网格（12/页、搜索、来源筛选、翻页）、420px 无横向溢出。
+
+长会话压测（`tests_py/test_long_session.py`）：合成 20,000 条 cc-haha transcript（含 fork 抄写同 id）+ 5,000 条
+WorkBuddy `rawUsage`，断言去重后 reqs/tokens 精确、守恒全绿、冷启动 < 20s、进程内缓存第二次更快。
+
+## 4. Windows 实机证据（artifacts/）
+
+`windows-verify-FINAL-card.json` / `FINAL-insights.json` / `FINAL-peek.json` 均 `ok=true`，检查项：
+
+- 进程存活、`runtime.json` 就绪、主窗与 `cc-hud-dot` 均存在；

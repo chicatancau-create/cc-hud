@@ -1,0 +1,119 @@
+def test_run_menu_check_item_toggles_once(tmp_path, monkeypatch):
+    h = _host(tmp_path, monkeypatch)          # topmost 当前 True
+    h.run_menu("setting.topmost")
+    assert h.bridge.saved[-1] == {"topmost": False}
+    h.run_menu("setting.topmost")
+    assert h.bridge.saved[-1] == {"topmost": True}
+
+
+def test_run_menu_export_uses_existing_export_path(tmp_path, monkeypatch):
+    h = _host(tmp_path, monkeypatch)
+    out = h.run_menu("action.export")
+    assert out["ok"] is True
+    assert out["range"] == "7d"
+    assert out["result"]["revision"] == 3
+
+
+def test_run_menu_rejects_unknown_and_dev_commands(tmp_path, monkeypatch):
+    h = _host(tmp_path, monkeypatch)
+    assert h.run_menu("capture")["ok"] is False
+    assert h.run_menu("dpi")["ok"] is False
+    assert h.run_menu("nonsense")["ok"] is False
+
+
+def test_run_menu_power_requires_confirmation(tmp_path, monkeypatch):
+    h = _host(tmp_path, monkeypatch)
+    out = h.run_menu("power.shutdown")
+    assert out["ok"] is True and out["needs_confirm"] is True
+    assert out["power"] == "shutdown"
+
+
+# ── 托盘语义 ─────────────────────────────────────────────
+class _FakeTray:
+    def __init__(self, picked=None):
+        self.picked = picked
+        self.popups = 0
+        self.added = True
+        self.hwnd = 99
+        self.getrect_rc = 0
+
+    def popup(self, items):
+        self.popups += 1
+        self.last_items = items
+        return self.picked
+
+    def set(self, on, tip):
+        self.state = (on, tip)
+
+
+def test_left_click_toggles_exactly_once(tmp_path, monkeypatch):
+    h = _host(tmp_path, monkeypatch)
+    h.tray = _FakeTray()
+    h._on_tray("toggle")
+    assert h.hidden is True
+    h._on_tray("toggle")
+    assert h.hidden is False
+
+
+def test_right_click_opens_menu_only_and_does_not_toggle(tmp_path, monkeypatch):
+    h = _host(tmp_path, monkeypatch)
+    h.tray = _FakeTray(picked=None)
+    h._on_tray("menu")
+    assert h.hidden is False
+    assert h.tray.popups == 1
+    # 菜单树与 bridge.menu_model 同源（同一 build 函数）
+    assert isinstance(h.tray.last_items, list)
+    assert any(i["id"] == "panel.toggle" for i in menu_mod.walk(h.tray.last_items))
+
+
+def test_tray_menu_pick_prefers_frontend_dispatch(tmp_path, monkeypatch):
+    h = _host(tmp_path, monkeypatch)
+    h.tray = _FakeTray(picked="view.card")
+    calls = []
+    h.window.evaluate_js = lambda js: calls.append(js) or True
+    h._on_tray("menu")
+    assert calls and "__cchudTrayMenu" in calls[0] and "view.card" in calls[0]
+    assert h.status["tray_menu_via"] == "frontend"
+    assert h.bridge.saved == []               # 前端执行时宿主不再重复执行
+
+
+def test_tray_menu_pick_falls_back_to_host_when_frontend_gone(tmp_path, monkeypatch):
+    h = _host(tmp_path, monkeypatch)
+
+    def boom(_js):
+        raise RuntimeError("webview gone")
+
+    h.window.evaluate_js = boom
+    h.tray = _FakeTray(picked="view.card")
+    h._on_tray("menu")
+    assert h.bridge.saved[-1] == {"layout": "card"}
+    assert h.status["tray_menu_via"] == "host"
+
+
+def test_click_debounce_suppresses_duplicate_shell_messages():
+    # 一次物理单击会被 Shell 发成多条消息；同事件在窗口内只认第一条
+    q = __import__("queue").Queue()
+    t = tray_mod.Tray.__new__(tray_mod.Tray)
+    t.q = q
+    t._last = {}
+    t.suppressed = 0
+    assert t._accept("toggle") is True
+    assert t._accept("toggle") is False
+    assert t._accept("toggle") is False
+    assert t.suppressed == 2
+    assert t._accept("menu") is True           # 不同事件类型互不影响
+
+
+def test_tray_struct_has_popup_and_quit_releases():
+    assert hasattr(tray_mod.Tray, "popup")
+    assert hasattr(tray_mod.Tray, "quit")
+
+
+# ── 旧配置兼容 ───────────────────────────────────────────
+def test_legacy_settings_with_peek_still_load(tmp_path):
+    from cchud_next.settings import SettingsStore
+
+    path = tmp_path / "hud-next-state.json"
+    path.write_text(json.dumps({"alpha": 0.86, "topmost": False, "peek": True,
+                                "range": "30d", "layout": "insights",
+                                "theme": "light", "hollow": True}), encoding="utf-8")

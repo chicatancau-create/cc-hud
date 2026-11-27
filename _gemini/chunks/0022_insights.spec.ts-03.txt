@@ -1,0 +1,10 @@
+  await page.setViewportSize({ width: 1180, height: 800 });
+  await page.goto("/");
+  await expect(page.getByTestId("insights")).toBeVisible();
+  await page.getByTestId("insights").click({ button: "right", position: { x: 30, y: 30 } });
+  await expect(page.getByTestId("context-menu")).toBeVisible();
+  await expect(page.getByTestId("menu-app.quit")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("context-menu")).toBeHidden();
+  await expect(page.getByTestId("insights")).toBeVisible();
+});

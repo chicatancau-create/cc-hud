@@ -1,0 +1,7 @@
+.gitignore
+README.md
+cc-hud.ico
+cc-hud.pyw
+pyproject.toml
+start-hud.bat
+uv.lock

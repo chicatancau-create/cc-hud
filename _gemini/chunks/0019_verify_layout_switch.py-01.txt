@@ -1,0 +1,121 @@
+# -*- coding: utf-8 -*-
+"""真实鼠标布局切换验收：card→insights→7天→诊断→设置→洞察→card。
+
+- 清除 CC_HUD_SIZE，走生产尺寸；CC_HUD_FAKE_POWER=1，禁止真实电源。
+- 只认前端上报的固定目标矩形（CC_HUD_SELFTEST=layout）。
+- 用 SetCursorPos + SendInput 发真实左键 down/up，不直接调用 apply_settings。
+- 每步校验 layout、HWND 尺寸、WindowFromPoint 归属、color-key 策略、截图。
+"""
+from __future__ import annotations
+
+import ctypes
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+from ctypes import wintypes as wt
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from cchud_next.win32 import WindowOps, dpi_aware, monitors  # noqa: E402
+
+STATUS = ROOT / "artifacts" / "runtime.json"
+OUT = ROOT / "artifacts" / "layout-switch.json"
+SHOTS = ROOT / "artifacts" / "windows"
+
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+user32.SetForegroundWindow.argtypes = [wt.HWND]
+user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+user32.WindowFromPoint.argtypes = [wt.POINT]
+user32.WindowFromPoint.restype = wt.HWND
+user32.GetAncestor.argtypes = [wt.HWND, wt.UINT]
+user32.GetAncestor.restype = wt.HWND
+user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+user32.GetWindowRect.argtypes = [wt.HWND, ctypes.POINTER(wt.RECT)]
+user32.ScreenToClient.argtypes = [wt.HWND, ctypes.POINTER(wt.POINT)]
+user32.ChildWindowFromPointEx.argtypes = [wt.HWND, wt.POINT, wt.UINT]
+user32.ChildWindowFromPointEx.restype = wt.HWND
+CWP_SKIPINVISIBLE = 0x0001
+
+GA_ROOT = 2
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_WHEEL = 0x0800
+
+SIZES = {"card": (424, 330), "insights": (1180, 800),
+         "diagnostics": (1080, 760), "settings": (760, 640)}
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", wt.LONG), ("dy", wt.LONG), ("mouseData", wt.DWORD),
+                ("dwFlags", wt.DWORD), ("time", wt.DWORD), ("dwExtraInfo", ctypes.c_size_t)]
+
+
+class INPUT(ctypes.Structure):
+    _fields_ = [("type", wt.DWORD), ("mi", MOUSEINPUT)]
+
+
+def send_click(x: int, y: int) -> None:
+    user32.SetCursorPos(int(x), int(y))
+    time.sleep(0.05)
+    for flag in (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP):
+        inp = INPUT(type=0, mi=MOUSEINPUT(0, 0, 0, flag, 0, 0))
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        time.sleep(0.02)
+
+
+def owner_pid(hwnd: int) -> int:
+    pid = wt.DWORD()
+    user32.GetWindowThreadProcessId(wt.HWND(hwnd), ctypes.byref(pid))
+    return int(pid.value)
+
+
+def root_of(hwnd: int) -> int:
+    return int(user32.GetAncestor(wt.HWND(hwnd), GA_ROOT) or 0)
+
+
+def hit_inside(main: int, x: int, y: int) -> tuple[bool, str]:
+    """颜色键分层窗会被 WindowFromPoint 跳过；再用本窗子树命中兜底。"""
+    h = user32.WindowFromPoint(wt.POINT(x, y))
+    if h and root_of(int(h)) == main:
+        return True, "WindowFromPoint"
+    pt = wt.POINT(int(x), int(y))
+    user32.ScreenToClient(wt.HWND(main), ctypes.byref(pt))
+    child = user32.ChildWindowFromPointEx(wt.HWND(main), pt, CWP_SKIPINVISIBLE)
+    if child:
+        return True, "ChildWindowFromPointEx"
+    return False, "miss"
+
+
+def read_status() -> dict:
+    try:
+        return json.loads(STATUS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def wait_for(pred, seconds: float, interval: float = 0.2):
+    end = time.time() + seconds
+    while time.time() < end:
+        v = pred()
+        if v:
+            return v
+        time.sleep(interval)
+    return None
+
+
+def launch(dpi: int | None, label: str) -> tuple[subprocess.Popen, dict]:
+    env = dict(os.environ)
+    for key in ("CC_HUD_SIZE", "CC_HUD_LAYOUT", "CC_HUD_ALPHA", "CC_HUD_RANGE", "CC_HUD_HOLLOW"):
+        env.pop(key, None)
+    env["CC_HUD_SELFTEST"] = "layout"
+    env["CC_HUD_FAKE_POWER"] = "1"
+    env["CC_HUD_PROFILE"] = tempfile.mkdtemp(prefix="cchud-layout-")
+    env["CC_HUD_MUTEX"] = rf"Local\cc-hud-layout-{os.getpid()}-{label}"
+    env.pop("CC_HUD_FORCE_DPI", None)
+    if dpi:
+        env["CC_HUD_FORCE_DPI"] = str(dpi)

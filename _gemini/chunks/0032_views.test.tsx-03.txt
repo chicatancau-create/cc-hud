@@ -1,0 +1,37 @@
+  it("小卡显示范围胶囊与指标", () => {
+    render(<CardView snap={base} range="7d" refreshing={false} onRange={noop}
+      onExpand={noop} onSettings={noop} />);
+    expect(screen.getByTestId("card-view")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "7 天" })).toHaveClass("on");
+    expect(screen.getByText("cc-hud")).toBeInTheDocument();
+  });
+
+  it("全部来源读取失败：小卡出现状态横幅，说明 0 不代表真实用量", () => {
+    const failed: Snapshot = {
+      ...emptySnap(),
+      status: "error",
+      kpis: { sessions: 0, active_days: 0, cost: 0, tokens: 0, cache_hit: null, credits: null },
+      sources: base.sources.map((s) => ({ ...s, status: "error" as const, reason: "读取失败" }))
+    };
+    render(<CardView snap={failed} range="7d" refreshing={false} onRange={noop}
+      onExpand={noop} onSettings={noop} />);
+    const banner = screen.getByTestId("card-status");
+    expect(banner).toHaveTextContent("不代表真实用量");
+    expect(banner).toHaveAttribute("data-tone", "error");
+    // 数字仍照原样显示（0 就是 0），只是旁边必须说明它不可信
+    expect(screen.getByText("$0.00")).toBeInTheDocument();
+  });
+
+  it("真实零值（来源全正常）：小卡不出现状态横幅", () => {
+    const zero: Snapshot = {
+      ...emptySnap(),
+      status: "ok",
+      kpis: { sessions: 0, active_days: 0, cost: 0, tokens: 0, cache_hit: null, credits: 0 },
+      sources: base.sources.map((s) => ({ ...s, status: "ok" as const, reason: null }))
+    };
+    render(<CardView snap={zero} range="7d" refreshing={false} onRange={noop}
+      onExpand={noop} onSettings={noop} />);
+    expect(screen.queryByTestId("card-status")).not.toBeInTheDocument();
+    expect(screen.getByText("$0.00")).toBeInTheDocument();
+  });
+});

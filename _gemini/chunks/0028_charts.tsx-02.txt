@@ -1,0 +1,100 @@
+    <div className="heat-wrap" data-testid="heatmap">
+      <div className="heat-body">
+        <ul className="heat-weekdays" aria-hidden="true">
+          {WEEKDAYS.map((w, i) => <li key={w} data-show={i % 2 === 0 ? "1" : undefined}>{w}</li>)}
+        </ul>
+        <div className="heat" role="img" aria-label="近 26 周活跃度">
+          {cells.map((c) => (
+            <i
+              key={c.date}
+              className={`heat-cell heat-${c.level}`}
+              title={`${c.date} · ${c.value ? fmtTokens(c.value) + " tok" : "无记录"}`}
+            />
+          ))}
+        </div>
+      </div>
+      <div className="heat-legend">
+        <span className="dim">少</span>
+        {[0, 1, 2, 3, 4].map((l) => <i key={l} className={`heat-cell heat-${l}`} />)}
+        <span className="dim">多</span>
+      </div>
+    </div>
+  );
+}
+
+/** token 构成环：环用 SVG，中心文字用 HTML（字号才和界面一致） */
+export function TokenDonut({ snap }: { snap: Snapshot }) {
+  const total = snap.totals.tokens;
+  const parts = [
+    { key: "fresh_in", label: "新增输入", color: "var(--c-in)" },
+    { key: "out", label: "输出", color: "var(--c-out)" },
+    { key: "cache_read", label: "缓存读", color: "var(--c-read)" },
+    { key: "cache_write", label: "缓存写", color: "var(--c-write)" }
+  ] as const;
+  const R = 52;
+  const C = 2 * Math.PI * R;
+  let offset = 0;
+  return (
+    <div className="donut-wrap">
+      <div className="donut-box">
+        <svg viewBox="0 0 120 120" className="donut" role="img" aria-label="token 构成">
+          <circle cx="60" cy="60" r={R} fill="none" stroke="var(--track)" strokeWidth="12" />
+          {total > 0 &&
+            parts.map((p) => {
+              const share = snap.totals[p.key] / total;
+              const dash = share * C;
+              const el = (
+                <circle
+                  key={p.key}
+                  cx="60" cy="60" r={R} fill="none"
+                  stroke={p.color} strokeWidth="12" strokeLinecap="butt"
+                  strokeDasharray={`${Math.max(0, dash - 2)} ${C - Math.max(0, dash - 2)}`}
+                  strokeDashoffset={-offset}
+                  transform="rotate(-90 60 60)"
+                  data-part={p.key}
+                />
+              );
+              offset += dash;
+              return el;
+            })}
+        </svg>
+        <div className="donut-center">
+          <b>{fmtTokens(total)}</b>
+          <span>tokens</span>
+        </div>
+      </div>
+      <ul className="legend">
+        {parts.map((p) => (
+          <li key={p.key}>
+            <i style={{ background: p.color }} />
+            <span>{p.label}</span>
+            <b>{fmtTokens(snap.totals[p.key])}</b>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** 小卡里的一周走势：只给形状，不给数字，高度吃满剩余空间 */
+export function CardSpark({ snap, days = 14, slots = 14 }: { snap: Snapshot; days?: number; slots?: number }) {
+  const daily = snap.daily.slice(-days);
+  if (daily.length === 0) return null;
+  const max = Math.max(1, ...daily.map((d) => d.tokens));
+  // 补空槽：范围只有 1 天时不能把整条渲染成一根占满全宽的柱子（看起来像个大色块）
+  const ghosts = Math.max(0, slots - daily.length);
+  return (
+    <div className="card-spark" data-testid="card-spark" title={`近 ${daily.length} 天 token 走势`}>
+      {Array.from({ length: ghosts }, (_, i) => (
+        <i key={`ghost-${i}`} className="spark-ghost" aria-hidden="true" />
+      ))}
+      {daily.map((d) => (
+        <i
+          key={d.date}
+          style={{ height: `${Math.max(6, (d.tokens / max) * 100)}%` }}
+          title={`${d.date} · ${fmtTokens(d.tokens)} tok`}
+        />
+      ))}
+    </div>
+  );
+}

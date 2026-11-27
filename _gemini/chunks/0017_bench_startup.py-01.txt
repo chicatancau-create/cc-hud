@@ -1,0 +1,111 @@
+"""启动耗时实测：冷/热各多轮，取中位数；同时读 Host 打点与常驻内存。
+
+测量口径（写进报告）：
+- 冷启动：每轮先结束所有 HUD 进程，再删除指定 profile 目录，测量
+  「Popen -> runtime.json 里 ready=true」的墙钟时间。
+- 热启动：复用同一 profile 目录（WebView2 已有缓存），同样测 Popen -> ready。
+- ready 内部拆分来自 cchud_next.bench 的打点（webview_import / host_ready / bench）。
+- 常驻内存：ready 后等待 settle 秒，读进程 PrivateMemorySize64。
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+PY_W = ROOT / ".venv" / "Scripts" / "pythonw.exe"
+PY = ROOT / ".venv" / "Scripts" / "python.exe"
+OUT = ROOT / "artifacts" / "startup-bench.json"
+RUNTIME = ROOT / "artifacts" / "runtime.json"
+
+
+def _hud_mutex_held() -> bool:
+    import ctypes
+
+    k32 = ctypes.windll.kernel32
+    k32.OpenMutexW.restype = ctypes.c_void_p
+    h = k32.OpenMutexW(0x00100000, False, r"Local\cc-hud-single")
+    if h:
+        k32.CloseHandle(ctypes.c_void_p(h))
+        return True
+    return False
+
+
+def _kill_running() -> None:
+    """结束 cc-hud.pyw 进程并等互斥体真正释放。
+
+    不等会让下一轮撞上单实例闸门：新进程秒退、runtime.json 不写，测出 ready=None。
+    """
+    script = (
+        "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*cc-hud.pyw*' } "
+        "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                   capture_output=True, text=True)
+    end = time.time() + 15
+    while time.time() < end:
+        if not _hud_mutex_held():
+            time.sleep(0.4)                 # 再让 Shell/WebView2 收尾一会儿
+            return
+        time.sleep(0.2)
+
+
+def _mem_mb(pid: int) -> float | None:
+    """被测 pythonw 的整棵进程树私有内存之和（本体 + msedgewebview2 等后代）。
+
+    只按命令行匹配 cc-hud.pyw 会漏掉 WebView2 子进程，两版口径不可比，
+    所以从被测 PID 沿 ParentProcessId 递归收全部后代。
+    """
+    ps1 = Path(tempfile.gettempdir()) / "cchud-bench-mem.ps1"
+    ps1.write_text(
+        "param([int]$Root)\n"
+        "$all = Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId\n"
+        "$ids = New-Object System.Collections.Generic.List[int]\n"
+        "$ids.Add($Root)\n"
+        "for ($i = 0; $i -lt $ids.Count; $i++) {\n"
+        "  $cur = $ids[$i]\n"
+        "  foreach ($p in $all) { if ($p.ParentProcessId -eq $cur -and -not $ids.Contains($p.ProcessId)) "
+        "{ $ids.Add($p.ProcessId) } }\n"
+        "}\n"
+        "$sum = 0\n"
+        "foreach ($id in $ids) {\n"
+        "  $g = Get-Process -Id $id -ErrorAction SilentlyContinue\n"
+        "  if ($g) { $sum += $g.PrivateMemorySize64 }\n"
+        "}\n"
+        "Write-Output $sum\n", encoding="utf-8")
+    out = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                          "-File", str(ps1), str(pid)],
+                         capture_output=True, text=True).stdout.strip()
+    try:
+        return round(int(out) / 1024 / 1024, 1)
+    except ValueError:
+        return None
+
+
+def _tree(pid: int) -> dict:
+    """被测 PID 的后代进程统计：进程数 + 按名字分组。第二窗口会多一个 WebView2 渲染进程。"""
+    ps1 = Path(tempfile.gettempdir()) / "cchud-bench-tree.ps1"
+    ps1.write_text(
+        "param([int]$Root)\n"
+        "$all = Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name\n"
+        "$ids = New-Object System.Collections.Generic.List[int]\n"
+        "$ids.Add($Root)\n"
+        "for ($i = 0; $i -lt $ids.Count; $i++) {\n"
+        "  $cur = $ids[$i]\n"
+        "  foreach ($p in $all) { if ($p.ParentProcessId -eq $cur -and -not $ids.Contains($p.ProcessId)) "
+        "{ $ids.Add($p.ProcessId) } }\n"
+        "}\n"
+        "$names = @()\n"
+        "foreach ($id in $ids) {\n"
+        "  $n = ($all | Where-Object { $_.ProcessId -eq $id } | Select-Object -First 1).Name\n"
+        "  if ($n) { $names += $n } else { $names += 'pythonw.exe' }\n"
+        "}\n"
+        "Write-Output ($names -join ',')\n", encoding="utf-8")

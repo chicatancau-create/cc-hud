@@ -1,0 +1,88 @@
+const settle = (ms = 60) => new Promise((r) => setTimeout(r, ms));
+
+async function bootCard(api: HudApi) {
+  window.pywebview = { api: api as never };
+  render(<App />);
+  await screen.findByTestId("card-view");
+  await waitFor(() => expect(screen.queryByTestId("loading")).not.toBeInTheDocument());
+}
+
+describe("布局切换", () => {
+  it("真实点击展开洞察会调用 set_settings({layout:'insights'})", async () => {
+    const { api } = makeApi({ layout: "card" });
+    const spy = vi.spyOn(api, "set_settings");
+    window.pywebview = { api: api as never };
+    render(<App />);
+    await screen.findByTestId("card-view");
+    await waitFor(() => expect(screen.queryByTestId("loading")).not.toBeInTheDocument());
+    await userEvent.click(await screen.findByTestId("expand-insights"));
+    await waitFor(() => expect(spy).toHaveBeenCalledWith({ layout: "insights" }));
+  });
+
+  it("原生 resize 失败：保留小卡、提示可见、无 unhandled rejection", async () => {
+    const { api } = makeApi({ layout: "card", failLayout: true });
+    window.pywebview = { api: api as never };
+    const watch = watchUnhandled();
+    try {
+      render(<App />);
+      await screen.findByTestId("card-view");
+      await waitFor(() => expect(screen.queryByTestId("loading")).not.toBeInTheDocument());
+      await userEvent.click(await screen.findByTestId("expand-insights"));
+      await screen.findByText(/设置失败/);
+      expect(screen.getByTestId("card-view")).toBeInTheDocument();
+      expect(screen.queryByTestId("insights")).not.toBeInTheDocument();
+      await settle();
+      expect(watch.count()).toBe(0);
+    } finally {
+      watch.stop();
+    }
+  });
+});
+
+describe("主面板右键菜单", () => {
+  it("右键阻止默认菜单，弹出与托盘同源的命令树；Esc 关闭", async () => {
+    const { api } = makeApi({ layout: "insights" });
+    window.pywebview = { api: api as never };
+    render(<App />);
+    await screen.findByTestId("insights");
+
+    const notCancelled = fireEvent.contextMenu(screen.getByTestId("insights"), { clientX: 40, clientY: 60 });
+    expect(notCancelled).toBe(false);                 // preventDefault 生效
+    const menu = await screen.findByTestId("context-menu");
+    expect(menu).toBeInTheDocument();
+    expect(screen.getByTestId("menu-panel.toggle")).toBeInTheDocument();
+    expect(screen.getByTestId("menu-app.quit")).toHaveClass("danger");
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("context-menu")).not.toBeInTheDocument());
+    // Esc 关菜单时不能顺带把小卡收起
+    expect(screen.getByTestId("insights")).toBeInTheDocument();
+  });
+
+  it("菜单命令真正走 menu_command，视图/范围随回包更新", async () => {
+    const { api, cmds } = makeApi({ layout: "insights", bootRange: "1d" });
+    window.pywebview = { api: api as never };
+    render(<App />);
+    await screen.findByTestId("insights");
+
+    fireEvent.contextMenu(screen.getByTestId("insights"), { clientX: 10, clientY: 10 });
+    await screen.findByTestId("context-menu");
+    await userEvent.click(screen.getByTestId("menu-submenu.view"));
+    await userEvent.click(await screen.findByTestId("menu-view.insights"));
+    await waitFor(() => expect(cmds).toContain("view.insights"));
+    await waitFor(() => expect(screen.queryByTestId("context-menu")).not.toBeInTheDocument());
+
+    fireEvent.contextMenu(screen.getByTestId("insights"), { clientX: 10, clientY: 10 });
+    await userEvent.click(await screen.findByTestId("menu-submenu.range"));
+    await userEvent.click(await screen.findByTestId("menu-range.30d"));
+    await waitFor(() => expect(cmds).toContain("range.30d"));
+    await waitFor(() => expect(screen.getByTestId("range-30d")).toHaveClass("on"));
+  });
+
+  it("托盘选中的命令复用同一 runMenu（__cchudTrayMenu）", async () => {
+    const { api, cmds } = makeApi({ layout: "insights" });
+    window.pywebview = { api: api as never };
+    render(<App />);
+    await screen.findByTestId("insights");
+    const hook = (window as unknown as { __cchudTrayMenu?: (id: string) => boolean }).__cchudTrayMenu;
+    expect(typeof hook).toBe("function");

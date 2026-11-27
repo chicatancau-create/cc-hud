@@ -1,0 +1,90 @@
+        self.nid.uID = 1                            # 未赋值时是 0：Shell 不显示该图标，GetRect 也查不到
+        self.nid.uFlags = 0x1 | 0x2 | 0x4          # MESSAGE | ICON | TIP
+        self.nid.uCallbackMessage = WM_TRAY
+        self.set(True, '启动中')
+        if not ctypes.windll.shell32.Shell_NotifyIconW(0, ctypes.byref(self.nid)):
+            u.DestroyWindow(self.hwnd)      # 失败不留半初始化窗口，否则重试会撞类名
+            raise RuntimeError('Shell_NotifyIcon NIM_ADD 失败')
+        self.added = True
+        self.nid.uVersion = 4
+        ctypes.windll.shell32.Shell_NotifyIconW(4, ctypes.byref(self.nid))  # NIM_SETVERSION
+        rect = wt.RECT()
+        ident = _NII(ctypes.sizeof(_NII), self.hwnd, 1, b"\x00" * 16)
+        self.getrect_rc = ctypes.windll.shell32.Shell_NotifyIconGetRect(
+            ctypes.byref(ident), ctypes.byref(rect))
+        self.getrect = [rect.left, rect.top, rect.right, rect.bottom]
+
+    def _wnd(self, h, msg, wp, lp):
+        try:
+            if msg == self._taskbar_created:
+                # explorer 重启后 Shell 会丢图标；顶层窗能收到广播，重新 NIM_ADD
+                if getattr(self, "added", False):
+                    ctypes.windll.shell32.Shell_NotifyIconW(0, ctypes.byref(self.nid))
+                return 0
+            if msg == WM_TRAY:
+                ev = TRAY_EVT.get(lp & 0xFFFF)
+                if ev and self._accept(ev):
+                    self.q.put(ev)          # 只丢事件, 不在这里碰 Tk
+                return 1
+        except Exception:
+            return 0                        # Python 异常逃回原生窗口过程会直接带走进程
+        return ctypes.windll.user32.DefWindowProcW(h, msg, wp, lp)
+
+    def _accept(self, ev: str) -> bool:
+        """同一种事件在 DEBOUNCE 内只放行一次，挡掉 Shell 的多消息叠加。"""
+        now = time.monotonic()
+        if now - self._last.get(ev, 0.0) < DEBOUNCE:
+            self.suppressed += 1
+            return False
+        self._last[ev] = now
+        return True
+
+    # ── 右键原生菜单：和主面板共用 cchud_next.menu 生成的同一棵树 ──
+    def popup(self, items: list[dict]) -> str | None:
+        """按菜单树弹原生菜单，返回被选中的命令 id。
+
+        TrackPopupMenu 会阻塞到菜单关闭；菜单句柄用完立刻 DestroyMenu，
+        重复右键不会累积 GDI 对象。调用前必须 SetForegroundWindow，
+        否则点菜单外部不会消失（Win32 的经典坑）。
+        """
+        u = ctypes.windll.user32
+        u.CreatePopupMenu.restype = ctypes.c_void_p
+        u.AppendMenuW.argtypes = [ctypes.c_void_p, wt.UINT, ctypes.c_size_t, wt.LPCWSTR]
+        u.AppendMenuW.restype = wt.BOOL
+        u.DestroyMenu.argtypes = [ctypes.c_void_p]
+        u.TrackPopupMenu.argtypes = [ctypes.c_void_p, wt.UINT, ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_int, wt.HWND, ctypes.c_void_p]
+        u.TrackPopupMenu.restype = ctypes.c_int
+        u.GetCursorPos.argtypes = [ctypes.POINTER(wt.POINT)]
+
+        ids: dict[int, str] = {}
+        next_id = [1000]
+
+        MF_STRING, MF_POPUP, MF_SEPARATOR = 0x0, 0x10, 0x800
+        MF_GRAYED, MF_CHECKED, MF_DISABLED = 0x1, 0x8, 0x2
+        TPM_RETURNCMD, TPM_RIGHTBUTTON = 0x100, 0x2
+
+        def build(nodes: list[dict]) -> int:
+            hmenu = u.CreatePopupMenu()
+            for node in nodes:
+                if node.get("kind") == "separator":
+                    u.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
+                    continue
+                flags = MF_STRING
+                if node.get("kind") == "submenu":
+                    sub = build(node.get("children") or [])
+                    flags |= MF_POPUP
+                    if not node.get("enabled", True):
+                        flags |= MF_GRAYED
+                    u.AppendMenuW(hmenu, flags, sub, node.get("title", ""))
+                    continue
+                mid = next_id[0]
+                next_id[0] += 1
+                ids[mid] = str(node.get("id"))
+                if not node.get("enabled", True):
+                    flags |= MF_GRAYED | MF_DISABLED
+                if node.get("checked"):
+                    flags |= MF_CHECKED
+                title = node.get("title", "")
+                if node.get("danger"):
+                    title = "⚠ " + title

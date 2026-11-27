@@ -1,0 +1,47 @@
+  const item = (id: string, title: string, extra: Partial<MenuModel["items"][number]> = {}) => ({
+    id, title, kind: "command" as const, enabled: true, checked: false, danger: false, children: [], ...extra
+  });
+  return [
+    item("panel.toggle", "隐藏主面板"),
+    { ...item("sep1", ""), kind: "separator" as const },
+    { ...item("submenu.view", "视图"), kind: "submenu" as const, children: [
+      item("view.card", "小卡", { kind: "radio" as const, checked: settings.layout === "card" }),
+      item("view.insights", "洞察", { kind: "radio" as const, checked: settings.layout === "insights" }),
+      item("view.diagnostics", "诊断", { kind: "radio" as const, checked: settings.layout === "diagnostics" }),
+      item("view.settings", "设置", { kind: "radio" as const, checked: settings.layout === "settings" })
+    ] },
+    item("action.refresh", "刷新数据"),
+    item("action.export", "导出 JSON"),
+    item("app.quit", "退出程序", { danger: true })
+  ];
+}
+
+function stubMenuPatch(id: string): Partial<Settings> | null {
+  if (id.startsWith("view.")) return { layout: id.slice(5) as Settings["layout"] };
+  if (id.startsWith("range.")) return { range: id.slice(6) as Settings["range"] };
+  return null;
+}
+
+export function createNativeApi(): HudApi | null {
+  const py = window.pywebview?.api;
+  if (!py) return null;
+  const must = <T>(fn: (() => Promise<T>) | undefined, name: string): (() => Promise<T>) => {
+    if (!fn) throw new Error(`pywebview api 缺少 ${name}`);
+    return fn.bind(py);
+  };
+  return {
+    bootstrap: must(py.bootstrap as () => Promise<Bootstrap>, "bootstrap"),
+    snapshot: (range, seq) => (py.snapshot as HudApi["snapshot"])(range, seq),
+    detail: (key, range) => (py.detail as HudApi["detail"])(key, range),
+    get_settings: must(py.get_settings as () => Promise<Settings>, "get_settings"),
+    set_settings: (patch) => (py.set_settings as HudApi["set_settings"])(patch),
+    export_json: (range) => (py.export_json as HudApi["export_json"])(range),
+    power: (action, confirmed) => (py.power as HudApi["power"])(action, confirmed),
+    cancel_power: must(py.cancel_power as () => Promise<{ ok: boolean }>, "cancel_power"),
+    window: (action, value) => (py.window as HudApi["window"])(action, value),
+    menu_model: must(py.menu_model as () => Promise<MenuModel>, "menu_model"),
+    menu_command: (id, confirm) => (py.menu_command as HudApi["menu_command"])(id, confirm)
+  };
+}
+
+

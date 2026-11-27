@@ -1,0 +1,108 @@
+"""功能菜单与托盘语义：同一命令模型、左键单击只切一次、右键只弹菜单、托盘不可用不隐藏。"""
+from __future__ import annotations
+
+import json
+import threading
+
+import pytest
+
+from cchud_next import menu as menu_mod
+from cchud_next import tray as tray_mod
+
+from hostfakes import OpsStub, StubWin, make_host, patch_win32
+
+SETTINGS = {"alpha": 0.96, "topmost": True, "peek": True, "range": "7d",
+            "layout": "insights", "theme": "dark", "hollow": False}
+
+
+@pytest.fixture(autouse=True)
+def _env(monkeypatch):
+    monkeypatch.setenv("CC_HUD_FORCE_DPI", "96")
+    monkeypatch.delenv("CC_HUD_SIZE", raising=False)
+
+
+def _host(tmp_path, monkeypatch, settings=None):
+    ops = OpsStub()
+    patch_win32(monkeypatch, ops)
+    h = make_host(tmp_path, ops=ops, window=StubWin())
+    h.settings = dict(settings or SETTINGS)
+    h.hidden = False
+    h._write_status = lambda: None
+    h.bridge = _FakeBridge(h)
+    return h
+
+
+class _FakeBridge:
+    def __init__(self, host):
+        self.host = host
+        self.saved: list[dict] = []
+
+    def set_settings(self, patch):
+        self.saved.append(dict(patch))
+        self.host.settings = {**self.host.settings, **patch}
+        return dict(self.host.settings)
+
+    def export_json(self, rng):
+        return {"path": "cc-hud-usage-7d.json", "bytes": 12, "revision": 3, "range": rng}
+
+
+# ── 命令模型 ─────────────────────────────────────────────
+def test_menu_covers_required_commands_and_marks_current_state():
+    items = menu_mod.build(SETTINGS, hidden=False, tray_ok=True)
+    ids = {i["id"] for i in menu_mod.leaves(items)}
+    required = {
+        "panel.toggle", "action.refresh", "action.export", "action.open_settings",
+        "setting.topmost", "setting.hollow", "app.quit",
+        "view.card", "view.insights", "view.diagnostics", "view.settings",
+        "range.1d", "range.7d", "range.30d", "range.all",
+        "setting.alpha.100", "setting.theme.dark", "power.shutdown",
+    }
+    assert required <= ids
+
+    checked = {i["id"] for i in menu_mod.leaves(items) if i["checked"]}
+    assert {"view.insights", "range.7d", "setting.alpha.96", "setting.theme.dark"} <= checked
+    assert "setting.topmost" in checked          # check 项按当前值显示
+
+    powers = next(i for i in items if i["id"] == "submenu.power")
+    assert powers["danger"] is True
+    assert all(p["danger"] for p in powers["children"])
+
+
+def test_menu_hides_dev_commands():
+    ids = {i["id"] for i in menu_mod.walk(menu_mod.build(SETTINGS))}
+    for dev in ("capture", "dpi", "place", "selftest"):
+        assert not any(dev in i for i in ids), dev
+
+
+def test_panel_toggle_disabled_when_tray_unavailable():
+    items = menu_mod.build(SETTINGS, hidden=False, tray_ok=False)
+    toggle = next(i for i in menu_mod.leaves(items) if i["id"] == "panel.toggle")
+    assert toggle["enabled"] is False
+    # 已隐藏时仍要能「显示主面板」
+    again = menu_mod.build(SETTINGS, hidden=True, tray_ok=False)
+    toggle2 = next(i for i in menu_mod.leaves(again) if i["id"] == "panel.toggle")
+    assert toggle2["enabled"] is True
+    assert toggle2["title"] == "显示主面板"
+
+
+def test_patch_for_maps_ids_to_settings():
+    assert menu_mod.patch_for("view.card") == {"layout": "card"}
+    assert menu_mod.patch_for("range.all") == {"range": "all"}
+    assert menu_mod.patch_for("setting.alpha.86") == {"alpha": 0.86}
+    assert menu_mod.patch_for("setting.theme.light") == {"theme": "light"}
+    assert menu_mod.patch_for("action.open_settings") == {"layout": "settings"}
+    assert menu_mod.patch_for("panel.toggle") is None
+    assert menu_mod.patch_for("capture") is None
+
+
+# ── 分发：两处菜单同一条路径 ────────────────────────────────
+def test_run_menu_view_range_and_settings_reuse_bridge(tmp_path, monkeypatch):
+    h = _host(tmp_path, monkeypatch)
+    assert h.run_menu("view.card")["ok"] is True
+    assert h.bridge.saved[-1] == {"layout": "card"}
+    assert h.run_menu("range.30d")["ok"] is True
+    assert h.bridge.saved[-1] == {"range": "30d"}
+    assert h.run_menu("setting.alpha.86")["ok"] is True
+    assert h.bridge.saved[-1] == {"alpha": 0.86}
+
+

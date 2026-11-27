@@ -1,0 +1,81 @@
+    if not h:
+        raise ctypes.WinError()          # 宁可托盘挂不上并写明原因, 也不要留一个看不见的图标
+    return h
+
+
+class _NID(ctypes.Structure):
+    _fields_ = [('cbSize', wt.DWORD), ('hWnd', wt.HWND), ('uID', wt.UINT), ('uFlags', wt.UINT),
+                ('uCallbackMessage', wt.UINT), ('hIcon', ctypes.c_void_p), ('uX', wt.WORD),
+                ('uY', wt.WORD), ('szTip', wt.WCHAR * 128), ('dwState', wt.DWORD),
+                ('dwStateMask', wt.DWORD), ('szInfo', wt.WCHAR * 256),
+                ('uVersion', wt.UINT), ('szInfoTitle', wt.WCHAR * 64), ('dwInfoFlags', wt.DWORD),
+                ('guidItem', ctypes.c_char * 16), ('hBalloonIcon', ctypes.c_void_p)]
+
+
+class _WCX(ctypes.Structure):
+    _fields_ = [('cbSize', wt.UINT), ('style', wt.UINT),
+                ('lpfnWndProc', ctypes.c_void_p), ('cbClsExtra', ctypes.c_int),
+                ('cbWndExtra', ctypes.c_int), ('hInstance', ctypes.c_void_p),
+                ('hIcon', ctypes.c_void_p), ('hCursor', ctypes.c_void_p),
+                ('hbrBackground', ctypes.c_void_p), ('lpszMenuName', ctypes.c_wchar_p),
+                ('lpszClassName', ctypes.c_wchar_p), ('hIconSm', ctypes.c_void_p)]
+
+
+class _NII(ctypes.Structure):
+    """Shell_NotifyIconGetRect 要的是 NOTIFYICONIDENTIFIER（32 字节）。"""
+    _fields_ = [('cbSize', wt.DWORD), ('hWnd', wt.HWND), ('uID', wt.UINT),
+                ('guidItem', ctypes.c_char * 16)]
+
+
+class Tray:
+    """通知区域图标。WndProc 只处理托盘消息；host 的子类在 GUI 线程里同步处理事件。"""
+
+    WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_ssize_t, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+
+    def __init__(self, q):
+        self.q = q
+        # WndProc 在建窗过程中就会同步收到 WM_NCCREATE/WM_CREATE。
+        # 这些字段必须先就位，否则回调抛 AttributeError → 返回 0 → CreateWindowExW 静默失败。
+        self._taskbar_created = 0
+        self._last: dict[str, float] = {}
+        self.suppressed = 0
+        self.added = False
+        self._icons: dict[bool, int] = {}
+        self._tip = None
+        u = ctypes.windll.user32
+        k32 = ctypes.windll.kernel32
+        k32.GetModuleHandleW.restype = ctypes.c_void_p
+        u.CreateWindowExW.restype = wt.HWND
+        u.CreateWindowExW.argtypes = [wt.DWORD, wt.LPCWSTR, wt.LPCWSTR, wt.DWORD, ctypes.c_int,
+                                      ctypes.c_int, ctypes.c_int, ctypes.c_int, wt.HWND,
+                                      wt.HMENU, ctypes.c_void_p, ctypes.c_void_p]
+        u.DefWindowProcW.restype = ctypes.c_ssize_t
+        u.DefWindowProcW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+        self._proc = Tray.WNDPROC(self._wnd)
+        hinst = k32.GetModuleHandleW(None)
+        wc = _WCX()
+        wc.cbSize = ctypes.sizeof(wc)
+        wc.lpfnWndProc = ctypes.cast(self._proc, ctypes.c_void_p)
+        wc.hInstance = hinst
+        wc.lpszClassName = 'ccHudTrayWnd'
+        # 必须声明 argtypes/restype：64 位下 hInstance 会按 c_int 截断，
+        # 类和 CreateWindowEx 用的就不是同一个模块句柄，建窗静默返回 NULL（err=0）。
+        u.RegisterClassExW.restype = wt.ATOM
+        u.RegisterClassExW.argtypes = [ctypes.POINTER(_WCX)]
+        u.RegisterClassExW(ctypes.byref(wc))   # 类已存在（重试）也不算错
+        # 必须是隐藏的顶层窗（WS_EX_TOOLWINDOW），不能用 HWND_MESSAGE：
+        # message-only 窗口收不到 TaskbarCreated 等广播，Win11 Shell 会静默丢弃图标
+        # （NIM_ADD=1、GetRect=E_FAIL、溢出面板无条目）。2026-11-08 实测顶层窗 GetRect=0。
+        # 父窗口/菜单传 None；hInstance 显式包成 c_void_p：
+        # 64 位句柄按裸 int 传入会被 ctypes 在个别版本上按 32 位校验/截断，
+        # CreateWindowExW 于是静默返回 NULL（err=0），表现为「托盘建不出来」。
+        self.hwnd = u.CreateWindowExW(0x80, 'ccHudTrayWnd', 'cc-hud-tray', 0, 0, 0, 0, 0,
+                                      None, None, ctypes.c_void_p(hinst), None)
+        if not self.hwnd:
+            raise ctypes.WinError()
+        u.RegisterWindowMessageW.argtypes = [wt.LPCWSTR]
+        u.RegisterWindowMessageW.restype = wt.UINT
+        self._taskbar_created = u.RegisterWindowMessageW("TaskbarCreated")
+        self.nid = _NID()
+        self.nid.cbSize = ctypes.sizeof(_NID)
+        self.nid.hWnd = self.hwnd

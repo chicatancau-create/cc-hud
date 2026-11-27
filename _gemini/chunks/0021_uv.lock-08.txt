@@ -1,0 +1,42 @@
+    { url = "https://files.pythonhosted.org/packages/a7/37/fa19d41d083ef2a9c763234d6338c2213ea297ffb58377f566707cca60d5/pyobjc_framework_quartz-13.0-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:fdba4c5d095e2f88812d0584fdb4b35dc31f38d93145830cc955f42710f1f8ec", size = 221335, upload-time = "2026-10-30T10:42:38.825Z" },
+    { url = "https://files.pythonhosted.org/packages/c5/fa/11c471eb99c3a572343e86a4201e789f4076a8011f7b2c0261d9767e7149/pyobjc_framework_quartz-13.0-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:d76914284e721b96e2a7850da81343cd4af083a00d07afd87545be432d1e2e24", size = 216492, upload-time = "2026-10-30T10:42:39.935Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/62/cd1fc4fd3a95f7a09744ab25b315dd8c3ff0b69a18ce997a0af7ec28f1f2/pyobjc_framework_quartz-13.0-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:ab6f410ac494b63ed48294392650b88ce8229511a0eb0059458982daeeacc6f7", size = 221391, upload-time = "2026-10-30T10:42:41.015Z" },
+]
+
+[[package]]
+name = "pyobjc-framework-security"
+version = "13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc-core" },
+    { name = "pyobjc-framework-cocoa" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/63/3a/58e0d6ef73812d279a89858ffd06b64d08eebe30bf84441c4b4df6e9665d/pyobjc_framework_security-13.0.tar.gz", hash = "sha256:e5c3f90773fb53dcd525075011f80a83e6f38cb0ad0bcd13fb8f629bf35d22aa", size = 180769, upload-time = "2026-10-30T10:47:33.878Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/82/25/c5d23540075306642eb878bf410fadc392715cc5cc9cd164c8a98f3e9951/pyobjc_framework_security-13.0-cp314-cp314-macosx_10_15_universal2.whl", hash = "sha256:7c295d54229adf8241538057e9d0106cc24aba452ec0050b0c222c56f707620a", size = 45090, upload-time = "2026-10-30T10:43:36.93Z" },
+    { url = "https://files.pythonhosted.org/packages/59/76/c7a6aab1aec8c5ccb9d7c44ecb34a2e13d2324eac4a46e41583e632d8b14/pyobjc_framework_security-13.0-cp314-cp314t-macosx_10_15_universal2.whl", hash = "sha256:28a54bc028ac5951271ce168043111a478434e2271cbd054d460fdb246acc8ca", size = 46014, upload-time = "2026-10-30T10:43:37.95Z" },
+    { url = "https://files.pythonhosted.org/packages/a2/ff/5efff05a5d95d773aea79959bad44c7fcdc3ab5e16953c1780eff6a34177/pyobjc_framework_security-13.0-cp315-cp315-macosx_10_15_universal2.whl", hash = "sha256:e988fb40d2f0a83e453056829433cb464699fc0fe5169d2db76a833c15cdc769", size = 45101, upload-time = "2026-10-30T10:43:38.889Z" },
+    { url = "https://files.pythonhosted.org/packages/57/69/8c290c669729c206a4b741b0e29eb4f7e089de33c8f1f2cf6583cdc4a4b9/pyobjc_framework_security-13.0-cp315-cp315t-macosx_10_15_universal2.whl", hash = "sha256:2fcf3f415090829eb363cdd77df6370be17162700e34cd81d0bcf478c938a4b7", size = 46033, upload-time = "2026-10-30T10:43:39.951Z" },
+]
+
+[[package]]
+name = "pyobjc-framework-uniformtypeidentifiers"
+version = "13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc-core" },
+    { name = "pyobjc-framework-cocoa" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ba/3d/ab2b17b2d31286c405bc7d818cf85de538bd90144cd3163c693b0de1d623/pyobjc_framework_uniformtypeidentifiers-13.0.tar.gz", hash = "sha256:d70ae3722c91c57de71a77d1004a22a118e38798f66c30552cb93754f7a9cbb5", size = 20694, upload-time = "2026-10-30T10:47:49.642Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/73/90/a18455cfe09b8c4f339acf8667aea124b0fdb14094fd0f1b9a3c6ca2bce6/pyobjc_framework_uniformtypeidentifiers-13.0-py2.py3-none-any.whl", hash = "sha256:5375270af9980825b3a20267312bbd616e9828c4b7d5ab008c98d9bf6b8a51e3", size = 5042, upload-time = "2026-10-30T10:44:59.154Z" },
+]
+
+[[package]]
+name = "pyobjc-framework-webkit"
+version = "13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyobjc-core" },
+    { name = "pyobjc-framework-cocoa" },
+]

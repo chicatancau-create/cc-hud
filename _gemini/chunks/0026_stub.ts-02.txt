@@ -1,0 +1,78 @@
+    return {
+      date: dayKey(n - 1 - i),
+      reqs: Math.round(180 * wave),
+      tokens,
+      cost: Number((3.2 * wave).toFixed(2)),
+      fresh_in: Math.round(tokens * 0.18),
+      out: Math.round(tokens * 0.07),
+      cache_read: Math.round(tokens * 0.72),
+      cache_write: Math.round(tokens * 0.03),
+      credits: Number((1.1 * wave).toFixed(2))
+    };
+  });
+  const totals = totalsOf(days);
+  const denom = totals.cache_read + totals.fresh_in + totals.cache_write;
+  const sources = DEFS.map((d) => source(d, days));
+  const models: ModelRow[] = [
+    { name: "claude-sonnet-4.5", reqs: 312, tokens: Math.round(totals.tokens * 0.34), cost: 12.4, sources: ["ccswitch", "cchaha"] },
+    { name: "deepseek-v4", reqs: 268, tokens: Math.round(totals.tokens * 0.27), cost: 0, sources: ["dsh"] },
+    { name: "gpt-5-codex", reqs: 154, tokens: Math.round(totals.tokens * 0.18), cost: 4.2, sources: ["ccswitch", "codex"] },
+    { name: "glm-5", reqs: 96, tokens: Math.round(totals.tokens * 0.12), cost: 0, sources: ["zcode"] }
+  ];
+  const apps: AppRow[] = sources.filter((s) => s.status === "ok").map((s) => ({
+    key: s.key, name: s.name, reqs: s.totals.reqs, tokens: s.totals.tokens, cost: s.totals.cost
+  })).sort((a, b) => b.tokens - a.tokens);
+
+  const sessionRows = Array.from({ length: 30 }, (_, i) => {
+    const def = DEFS[i % DEFS.length];
+    return {
+      id: `${def.key}-session-${String(i + 1).padStart(3, "0")}`,
+      source: def.key,
+      reqs: 12 + ((i * 7) % 90),
+      tokens: 120000 + ((i * 37000) % 900000),
+      cost: Number(((i % 5) * 1.25).toFixed(2)),
+      credits: def.credits ? Number((i % 4)) : 0,
+      model: ["claude-sonnet-4.5", "deepseek-v4", "gpt-5-codex", "glm-5"][i % 4],
+      last_seen: BASE.getTime() / 1000 - i * 3600
+    };
+  });
+
+  return {
+    schema: 1, revision: 7, seq, range, generated_at: BASE.getTime() / 1000, status: "ok",
+    totals, kpis: {
+      sessions: 23, active_days: days.length, cost: totals.cost, tokens: totals.tokens,
+      cache_hit: denom ? (totals.cache_read / denom) * 100 : null, credits: 12.5
+    },
+    daily: days, hourly: Array.from({ length: 24 }, (_, h) => ({
+      hour: h, reqs: Math.round(4 + 40 * Math.exp(-Math.pow(h - 14, 2) / 40)), tokens: 0, cost: 0
+    })),
+    models, apps, sources, session_rows: sessionRows, session_total: sessionRows.length,
+    timing: { n: 240, p50: 1800, p95: 6400, ftt_n: 218, ftt_p50: 420, ftt_p95: 1500 },
+    tools: [
+      { name: "Read", n: 128, sessions: 21 },
+      { name: "Bash", n: 96, sessions: 18 },
+      { name: "Edit", n: 54, sessions: 12 },
+      { name: "Grep", n: 31, sessions: 9 },
+      { name: "Write", n: 22, sessions: 7 }
+    ],
+    conservation: [
+      { name: "totals_eq_days", ok: true, detail: `tokens=${totals.tokens}` },
+      { name: "tokens_eq_parts", ok: true, detail: "fresh+out+read+write" },
+      ...sources.filter((s) => s.status === "ok").map((s) => ({
+        name: `${s.key}.models_le_total`, ok: true, detail: s.key
+      }))
+    ],
+    start_date: days[0]?.date ?? null,
+    cache: { hits: 2, misses: 1, entries: 1, capacity: 8 }
+  };
+}
+
+export function stubBootstrap(): Bootstrap {
+  return {
+    version: "0.1.0",
+    ranges: [{ key: "1d", label: "今日" }, { key: "7d", label: "7 天" }, { key: "30d", label: "30 天" }, { key: "all", label: "全部" }],
+    settings: { alpha: 0.96, topmost: true, peek: true, range: "7d", layout: "insights", theme: "dark", hollow: false },
+    sources_meta: DEFS.map((d) => ({ key: d.key, name: d.name, kind: d.kind })),
+    dpi: 1.25, platform: "windows", start_date: dayKey(0)
+  };
+}

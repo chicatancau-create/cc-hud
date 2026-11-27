@@ -1,0 +1,58 @@
+cd web && npm run lint && npm run typecheck && npm test && npm run build
+# E2E
+cd web && npx playwright test
+# 实机
+python tools/verify_windows.py --layout card --wait 26 --shot my-card
+python tools/verify_windows.py --layout insights --wait 26 --shot my-insights
+python tools/verify_windows.py --layout card --hidden --wait 8 --shot my-peek
+# 启动（生产）
+start-hud-next.bat     # 旧回退：start-hud.bat / cc-hud.pyw
+```
+
+## 9. 结论
+
+自动化门禁、四范围对账与 Windows 单屏 125% 实机验收均通过；§7 的项目仍未验证，
+因此本轮**不能宣称整体完成**，需在具备第二块显示器/可改 DPI 的环境补测后才能给出最终结论。
+
+## 10. 2026-11-08 增补
+
+- 全部自动化门禁可用 `tools/gate_transcript.py` 一次重跑并重写 `docs/reports/2026-11-08-gate-transcript.md`，当轮 RC 全为 0。
+- 托盘复测（DPI-aware）：任务栏 [0,1540,2560,1600] 可见；`tools/tray_uia.ps1` 已能打开 Win11 溢出面板
+  （`TopLevelWindowForOverflowXamlIsland`，11 项）并回读清单，但**清单与可见托盘中都没有 cc-hud**；
+  `NIM_ADD` 返回成功、`Shell_NotifyIconGetRect` 仍 E_FAIL。证据：`artifacts/windows-verify-tray-uia.json`、
+  `artifacts/windows-verify-tray-hover.json`、`artifacts/windows/tray-tooltip.png`。托盘门禁仍判 **未通过**。
+- 托盘脚本修正：.ps1 改为 UTF-8 BOM（否则中文匹配被 PS 5.1 按 ANSI 读坏）、补 Win11 窗口类名、等待 1.4s。
+- 托盘结构修正：`_NID.szTip` 由 `WCHAR*64` 改为 SDK 的 `WCHAR*128`，`cbSize` 856→984；
+  原布局使后续字段整体错位，`NIM_ADD` 仍返回成功但提示丢失。回归测试 `tests_py/test_tray_struct.py`。
+  修正后图标在本机仍不出现在可见托盘或溢出面板（纯 `Tray`、普通隐藏窗口、GUID 注册三种探针均复现），
+  且股票图标 `IDI_APPLICATION` 与自绘图标同时 `NIM_ADD=1` 仍不可见；改用计划任务（普通用户令牌，
+  进程确认在 session 1 运行）启动同一探针仍不可见 —— 判定为本机 Shell 会话不接受新托盘项，
+  不是图标构造或应用装配问题。托盘门禁状态仍为**未通过**，需换机/换登录会话或人工确认。
+- 第二轮独立审查后修复 7 项数据/宿主缺陷并补测：导出按字段名脱敏（api_key/token/secret/authorization/password）；
+  Herdsman 不再把 request_id 当会话；cc-haha 成本改为“只记当日”、范围外会话不再进 `sids`；
+  WorkBuddy 仅在范围内登记 sid；`revision` 命中缓存也单调递增；ccswitch 多条 SELECT 用同一读快照（BEGIN）；
+  host 初始化改为 `_init_started` 防竞态，托盘通过 WinForms `BeginInvoke` 回到 GUI 线程创建（实测 `tray_added=true`）。
+  DSH 仅 `createdAt`、无法按日拆分，保持“数据不可得”解释。
+- 成本口径修正后 `all` 范围成本由 $423.25 变为 $412.09（此前把跨日会话成本摊到了范围内）。
+- 用户入口实机验收：`start-hud-next.bat` 启动后 runtime ready=true、tray_added=true，按 runtime pid 收尾无残留；批处理自检与 GIL 版 pythonw 路径有效。
+- 托盘像素取证器修正：原裁剪用“工作区”底边（任务栏不在工作区内，正常机器也会漏），改为整屏任务栏条带 `(sw-800, sh-64, sw, sh)`；
+  并改为按 runtime pid 收尾。本机实测 box=[1760,1536,2560,1600]、accent=10（他应用绿点）、GetRect=E_FAIL，仍判失败。
+- 托盘最后一项变量已排除：普通可见顶层窗口 + 真实消息泵 + 股票/自绘图标，`NIM_ADD=1` 但 UIA 溢出面板仍无该名、可见托盘无新增；
+  结合前述股票图标/GUID/SHOWTIP/v4/计划任务对照，判定为本机 Shell 会话不接受新托盘项。
+  Shell 归属只读核对：`Shell_TrayWnd` 与溢出层同属 explorer PID 10644（Console/会话 1，可见），
+  另有第二个 explorer 63132 但未持任务栏；`TrayNotifyWnd`/`NotifyIconOverflowWindow` 不存在（Win11 XAML 托盘）。
+- DPI 感知外部核验：验收器对宿主进程调用 `GetProcessDpiAwareness`，实测 awareness=2（PER_MONITOR），与源码 PER_MONITOR_AWARE_V2 一致；FINAL19-card 全项通过。
+- 设置持久化实机验收：新增 `CC_HUD_STATE` 覆盖（测试专用）与 `tools/verify_settings_persist.py`。预写 alpha=0.78/topmost=false/layout=card 后启动，runtime 实测 alpha=198、topmost=false、layout=card、圆点就位，`windows-verify-settings-persist.json` ok=true。
+- 前端审查 6 条全部修复：设置回包按序号只认最新（范围切换先乐观生效）；bootstrap 失败显示可重试错误而非永久加载；
+  小卡把 error/unsupported 分开展示、无当日数据时显示“—”而不是假 0；场景桩在 empty/zero/unsupported/error 下零化总量并置 `snap.status`；
+  电源二次确认 15 秒后自动取消，`#selftest=power` 仅在 `fake_power` 时自动执行；E2E 恢复“8/11 路正常”硬断言（不再 `.catch`）。
+- 托盘行为验收新增 `tools/tray_click.py`：向托盘窗口发 `WM_TRAY` 左键，实测主窗隐藏 → 圆点出现 → 再点恢复，
+  且 runtime 增加 `pid` 以只认本进程窗口；`windows-verify-tray-click.json` 门禁项全 true（圆点合成点击两项为信息项）。图标是否被系统显示仍是独立门禁。
+- 取证器两处真实缺陷已修：① `Shell_NotifyIconGetRect` 改用 32 字节 `NOTIFYICONIDENTIFIER`（原传 984 字节 NID，恒 E_INVALIDARG），
+  本机现返 E_FAIL“找不到图标”，与“Shell 不显示”一致；② 窗口归属改为按 runtime pid（.venv 的 python.exe 会拉起子进程，Popen pid≠宿主 pid），
+  只操作本进程窗口并等宿主退出，避免误关用户旧 `cc-hud.pyw`。探针同样按 runtime pid 收尾。
+- 托盘再补两项：注册后调用 `NIM_SETVERSION(4)`（现代通知语义，`NIN_SELECT` 仍映射 toggle），并立即 `Shell_NotifyIconGetRect`
+  记录 `tray_getrect_rc/tray_rect` 到 runtime。本机修结构前 rc=`0x80070057 (E_INVALIDARG)`，改传 NOTIFYICONIDENTIFIER 后为 E_FAIL、矩形全 0，与“Shell 不显示新图标”一致；
+  点击链路在 v4 下复测仍通过（隐藏/圆点/恢复）。正常机器可用这两个字段区分“已注册但不可见”。
+- 圆点窗口改为 `easy_drag=False`（避免拖拽手势吞点击），并在 loaded 后记录 `dot_api`（本机 true，说明 `window.pywebview.api` 已注入）。
+  合成鼠标点击未命中圆点（`WindowFromPoint` 落在 WebView2 子窗），该子项仅作信息记录；托盘再次点击恢复已实测通过。

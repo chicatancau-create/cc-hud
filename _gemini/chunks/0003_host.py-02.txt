@@ -1,0 +1,104 @@
+        self.status: dict = {"version": __version__, "started_at": time.time(),
+                             "layout": self.settings.get("layout"),
+                             "alpha_setting": self.settings.get("alpha")}
+        self._init_lock = threading.Lock()
+        self._initialized = False
+        self._init_started = False
+        self._retry_threads: dict[str, threading.Thread] = {}
+        self._retry_delay = 1.0
+        self.status_path = STATUS_PATH
+
+    # ---- WindowPort（供 bridge 调用） ----
+    def _run_on_gui(self, fn, *args, timeout: float = 10.0):
+        """WinForms 窗口属性必须在 GUI 线程改；跨线程 SetWindowPos 会被框架事后改写尺寸。"""
+        native = getattr(self.window, "native", None)
+        if native is None:
+            return fn(*args)
+        try:
+            needs_marshal = bool(native.InvokeRequired)
+        except Exception:
+            needs_marshal = False
+        if not needs_marshal:
+            return fn(*args)
+        from System import Action
+
+        done = threading.Event()
+        box: dict = {}
+
+        def runner() -> None:
+            try:
+                box["value"] = fn(*args)
+            except BaseException as exc:
+                box["error"] = exc
+            finally:
+                done.set()
+
+        native.BeginInvoke(Action(runner))
+        if not done.wait(timeout):
+            raise RuntimeError("等待 GUI 线程应用窗口设置超时")
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+
+    def apply_settings(self, settings: dict) -> None:
+        """先应用原生效果，成功才提交内存/状态；失败回滚并向上抛。"""
+        if not self.ops:
+            self.settings = dict(settings)
+            return
+        self._run_on_gui(self._apply_settings_sync, dict(settings))
+        self._refresh_targets()          # 需要 WebView2 求值，只能留在调用线程
+        self._write_status()
+
+    def _apply_settings_sync(self, settings: dict) -> None:
+        old = dict(self.settings)
+        cand = dict(settings)
+        changed = old.get("layout") != cand.get("layout")
+        if changed and old.get("layout") == "card":
+            try:
+                self._card_pos = self.ops.rect()
+            except Exception:
+                self._card_pos = None
+        try:
+            if changed:
+                self._apply_layout_size(cand)
+            self._apply_effects(cand)
+            if changed and cand.get("layout") == "card" and self._card_pos:
+                x, y, _r, _b = self._card_pos
+                w, h = self._layout_px(cand)
+                self.ops.move(x, y, w, h)
+        except Exception as exc:
+            self.status["apply_trace"] = traceback.format_exc()[-1500:]
+            try:
+                self._apply_effects(old)
+            except Exception:
+                pass
+            try:
+                if changed:
+                    self._apply_layout_size(old)
+                    if old.get("layout") == "card" and self._card_pos:
+                        x, y, _r, _b = self._card_pos
+                        w, h = self._layout_px(old)
+                        self.ops.move(x, y, w, h)
+            except Exception:
+                pass
+            raise RuntimeError(f"窗口应用失败：{exc}") from exc
+        self.settings = cand
+        self.status["layout"] = cand.get("layout")
+        try:
+            self.status["rect"] = list(self.ops.rect())
+        except Exception:
+            pass
+        self.status["colorkey"] = False   # 不再使用颜色键（见 hollow_mode）
+
+    def _apply_effects(self, settings: dict) -> None:
+        if not self.ops:
+            return
+        alpha = float(settings.get("alpha", 0.96))
+        if not self.ops.set_topmost(bool(settings.get("topmost", True))):
+            raise RuntimeError("置顶设置失败")
+        if use_colorkey(settings):
+            # 颜色键对 WebView2 子窗会整窗穿透（按钮也点不到）；改用圆角区域镂空 + alpha。
+            # 区域必须跟真实窗口一致，CC_HUD_SIZE 覆盖尺寸时也不能按布局名义值裁。
+            l, t, r, b = self.ops.rect()
+            w, h = max(1, r - l), max(1, b - t)
+            radius = max(6, int(14 * (w / 424)))

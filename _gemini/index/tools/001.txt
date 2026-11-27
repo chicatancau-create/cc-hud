@@ -1,0 +1,15 @@
+tools/bench_long.py
+tools/bench_startup.py
+tools/final_acceptance.py
+tools/gate_transcript.py
+tools/reconcile.py
+tools/shoot_ui.py
+tools/tray_click.py
+tools/tray_pixel.py
+tools/tray_probe_toplevel.py
+tools/tray_toolbar.py
+tools/tray_uia.ps1
+tools/verify_installed.py
+tools/verify_layout_switch.py
+tools/verify_settings_persist.py
+tools/verify_windows.py

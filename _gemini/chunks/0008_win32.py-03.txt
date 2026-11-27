@@ -1,0 +1,84 @@
+        user32.GetWindowRect(wt.HWND(self.hwnd), ctypes.byref(rect))
+        cw = width if width is not None else rect.right - rect.left
+        ch = height if height is not None else rect.bottom - rect.top
+        if "center" in anchor:
+            x = l + max(0, (r - l - cw) // 2)
+            y = t + max(0, (b - t - ch) // 2)
+        else:
+            x = r - cw - margin if "right" in anchor else l + margin
+            y = t + margin if "top" in anchor else b - ch - margin
+        x = max(l, min(x, r - cw - 4))
+        y = max(t, min(y, b - ch - 4))
+        flags = SWP_NOACTIVATE | (SWP_NOSIZE if keep_size else 0)
+        ok = bool(user32.SetWindowPos(wt.HWND(self.hwnd), 0, int(x), int(y),
+                                      int(cw), int(ch), flags))
+        err = 0 if ok else ctypes.get_last_error()
+        after = wt.RECT()
+        read_ok = bool(user32.GetWindowRect(wt.HWND(self.hwnd), ctypes.byref(after)))
+        out = {
+            "x": int(after.left) if read_ok else int(x),
+            "y": int(after.top) if read_ok else int(y),
+            "w": int(after.right - after.left) if read_ok else int(cw),
+            "h": int(after.bottom - after.top) if read_ok else int(ch),
+            "ok": ok,
+            "read_ok": read_ok,
+            "requested": [int(cw), int(ch)],
+            "monitor": mi["device"] if mi else None,
+        }
+        if not ok:
+            out["err"] = err
+        return out
+
+    def rect(self) -> tuple[int, int, int, int]:
+        r = wt.RECT()
+        user32.GetWindowRect(wt.HWND(self.hwnd), ctypes.byref(r))
+        return (int(r.left), int(r.top), int(r.right), int(r.bottom))
+
+    def move(self, x: int, y: int, width: int, height: int) -> dict:
+        user32.SetWindowPos(wt.HWND(self.hwnd), 0, int(x), int(y), int(width), int(height),
+                            SWP_NOACTIVATE)
+        return {"x": int(x), "y": int(y), "w": int(width), "h": int(height)}
+
+    def client_origin(self) -> tuple[int, int]:
+        pt = wt.POINT(0, 0)
+        user32.ClientToScreen(wt.HWND(self.hwnd), ctypes.byref(pt))
+        return int(pt.x), int(pt.y)
+
+    def capture(self, path: Path) -> dict:
+        """PrintWindow 优先；WebView2 常返回黑图，失败则回退屏幕 BitBlt。"""
+        from PIL import Image
+
+        rect = wt.RECT()
+        user32.GetWindowRect(wt.HWND(self.hwnd), ctypes.byref(rect))
+        w, h = rect.right - rect.left, rect.bottom - rect.top
+        if w <= 0 or h <= 0:
+            return {"ok": False, "reason": "窗口矩形为空", "w": w, "h": h}
+
+        def grab(printwindow: bool):
+            hdc = user32.GetDC(0)
+            mdc = gdi32.CreateCompatibleDC(hdc)
+            bmp = gdi32.CreateCompatibleBitmap(hdc, w, h)
+            gdi32.SelectObject(mdc, bmp)
+            if printwindow:
+                ok = user32.PrintWindow(wt.HWND(self.hwnd), mdc, PW_RENDERFULLCONTENT)
+            else:
+                ok = gdi32.BitBlt(mdc, 0, 0, w, h, hdc, rect.left, rect.top, 0x00CC0020)
+            class BIH(ctypes.Structure):
+                _fields_ = [("biSize", wt.DWORD), ("biWidth", wt.LONG), ("biHeight", wt.LONG),
+                            ("biPlanes", wt.WORD), ("biBitCount", wt.WORD), ("biCompression", wt.DWORD),
+                            ("biSizeImage", wt.DWORD), ("biXPelsPerMeter", wt.LONG),
+                            ("biYPelsPerMeter", wt.LONG), ("biClrUsed", wt.DWORD),
+                            ("biClrImportant", wt.DWORD)]
+            bi = BIH()
+            bi.biSize = ctypes.sizeof(BIH)
+            bi.biWidth, bi.biHeight = w, -h
+            bi.biPlanes, bi.biBitCount, bi.biCompression = 1, 32, 0
+            buf = ctypes.create_string_buffer(w * h * 4)
+            gdi32.GetDIBits(mdc, bmp, 0, h, buf, ctypes.byref(bi), 0)
+            img = Image.frombuffer("RGB", (w, h), buf, "raw", "BGRX", 0, 1)
+            gdi32.DeleteObject(bmp)
+            gdi32.DeleteDC(mdc)
+            user32.ReleaseDC(0, hdc)
+            return bool(ok), img
+
+        # 分层窗口（整窗 alpha）用屏幕 BitBlt 会把后面的桌面一起拍进来；

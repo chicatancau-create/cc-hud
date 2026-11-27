@@ -1,0 +1,97 @@
+  await page.getByRole("button", { name: "导出" }).click();
+  await expect(page.getByRole("status")).toContainText("rev");
+});
+
+test("刷新页面后不会卡在旧 seq 判定的加载中", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "上下文洞察" })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "上下文洞察" })).toBeVisible({ timeout: 20000 });
+});
+
+test("会话网格：搜索与分页", async ({ page }) => {
+  await page.goto("/");
+  const grid = page.getByTestId("sessions");
+  await expect(grid.locator(".session-card")).toHaveCount(12);
+  await page.getByLabel("搜索会话").fill("claude");
+  await expect(grid.locator(".session-card").first()).toBeVisible();
+  await page.getByLabel("搜索会话").fill("");
+  await page.getByRole("button", { name: "下一页" }).click();
+  await expect(page.getByText(/第 2\//)).toBeVisible();
+});
+
+test("窄视口不出现横向溢出", async ({ page }) => {
+  await page.setViewportSize({ width: 420, height: 860 });
+  await page.goto("/");
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
+  await shot(page, "narrow-420");
+});
+
+test("布局密度：KPI 3×2、重要内容上移、检测区下沉且宽屏两列", async ({ page }) => {
+  await page.setViewportSize({ width: 1180, height: 800 });
+  await page.goto("/");
+  const kpis = page.locator(".kpi");
+  await expect(kpis).toHaveCount(6);
+  const kb = await kpis.evaluateAll((els) => els.map((e) => {
+    const r = e.getBoundingClientRect();
+    return { x: r.x, y: Math.round(r.y), w: r.width };
+  }));
+  expect(new Set(kb.slice(0, 3).map((b) => b.y)).size).toBe(1);
+  expect(new Set(kb.slice(3).map((b) => b.y)).size).toBe(1);
+  expect(kb[3].y).toBeGreaterThan(kb[0].y);
+
+  const box = async (id: string) => {
+    const b = await page.getByTestId(id).boundingBox();
+    expect(b).not.toBeNull();
+    return b!;
+  };
+  const heat = await box("tile-heat");
+  const tools = await box("tile-tools");
+  const models = await box("tile-models");
+  // tiles 里只剩三块：热力与工具同行，模型整行紧随其后
+  expect(Math.abs(heat.y - tools.y)).toBeLessThanOrEqual(2);
+  expect(Math.abs(models.x - heat.x)).toBeLessThanOrEqual(2);
+  expect(models.width).toBeGreaterThanOrEqual(heat.width + tools.width - 4);
+  expect(Math.abs(models.y - (heat.y + heat.height))).toBeLessThanOrEqual(16);
+
+  // 检测区在会话与数据来源之后、页脚之前
+  const order = await page.evaluate(() => {
+    const q = (s: string) => document.querySelector(s)?.getBoundingClientRect().top ?? -1;
+    return {
+      sessions: q('[data-testid="sessions"]'),
+      sources: q(".sources-grid"),
+      zone: q('[data-testid="checks-zone"]'),
+      foot: q(".page-foot")
+    };
+  });
+  expect(order.zone).toBeGreaterThan(order.sources);
+  expect(order.zone).toBeGreaterThan(order.sessions);
+  expect(order.foot).toBeGreaterThan(order.zone);
+
+  // 宽屏守恒列表两列：同一行出现两个 li
+  const rows = await page.locator('[data-testid="tile-conservation"] .checks li').evaluateAll(
+    (els) => els.map((e) => Math.round(e.getBoundingClientRect().y)));
+  expect(new Set(rows).size).toBeLessThan(rows.length);
+
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+  await shot(page, "insights-density");
+});
+
+test("窄屏守恒列表回到单列且无横向溢出", async ({ page }) => {
+  await page.setViewportSize({ width: 460, height: 900 });
+  await page.goto("/");
+  await expect(page.getByTestId("checks-zone")).toBeVisible();
+  const rows = await page.locator('[data-testid="tile-conservation"] .checks li').evaluateAll(
+    (els) => els.map((e) => Math.round(e.getBoundingClientRect().y)));
+  // 单列时每个 li 独占一行（y 全不重复）
+  expect(new Set(rows).size).toBe(rows.length);
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
+  await shot(page, "narrow-checks");
+});
+
+test("主面板右键菜单弹出、Esc 关闭且不改变布局", async ({ page }) => {

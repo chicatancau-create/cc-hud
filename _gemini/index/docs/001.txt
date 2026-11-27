@@ -1,0 +1,15 @@
+docs/reports/2026-11-07-refactor-verification.md
+docs/reports/2026-11-07-visual-diff.md
+docs/reports/2026-11-08-delivery-index.md
+docs/reports/2026-11-08-final-audit.md
+docs/reports/2026-11-08-gate-transcript.md
+docs/reports/2026-11-08-requirements-checklist.md
+docs/reports/2026-11-08-window-density-report.md
+docs/reports/2026-11-09-doc-errata.md
+docs/reports/2026-11-09-fix-round.md
+docs/reports/2026-11-09-ui-redesign.md
+docs/reports/2026-11-10-tray-layout-startup-verification.md
+docs/superpowers/plans/2026-11-07-context-insight-refactor.md
+docs/superpowers/plans/2026-11-10-tray-layout-startup.md
+docs/superpowers/specs/2026-11-07-context-insight-refactor-design.md
+docs/superpowers/specs/2026-11-10-tray-layout-startup-design.md

@@ -1,0 +1,113 @@
+        setNotice(`设置失败：${e instanceof Error ? e.message : String(e)}`);
+      }
+      throw e;
+    }
+  }, [api]);
+
+  /** change() 失败已由 notice 提示，调用点只负责别让 rejection 逃出去（unhandled rejection） */
+  const applyQuiet = useCallback((patch: Partial<Settings>) => {
+    void change(patch).catch(() => undefined);
+  }, [change]);
+
+  const navigate = useCallback((layout: NavLayout) => applyQuiet({ layout }), [applyQuiet]);
+
+  useEffect(() => {
+    const m = window.location.hash.match(/scroll=(\d+)/);
+    if (!m) return;
+    const y = Number(m[1]);
+    const t = window.setInterval(() => {
+      const node = document.querySelector(".page") as HTMLElement | null;
+      if (node) node.scrollTop = y;
+      window.scrollTo(0, y);
+      document.documentElement.scrollTop = y;
+      document.body.scrollTop = y;
+    }, 600);
+    return () => window.clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    if (!boot?.selftest_layout || !snap || !settings) return;
+    const map: Record<string, string> = {
+      expand: "expand-insights", range7: "range-7d", collapse: "collapse-card",
+      diagnostics: "nav-diagnostics", settings: "nav-settings", insights: "nav-insights", card: "nav-card"
+    };
+    let raf = 0;
+    let last = "";
+    const send = () => {
+      const out: Record<string, [number, number]> = {};
+      for (const [key, id] of Object.entries(map)) {
+        const el = document.querySelector(`[data-testid="${id}"]`);
+        if (el) {
+          const r = el.getBoundingClientRect();
+          out[key] = [r.left + r.width / 2, r.top + r.height / 2];
+        }
+      }
+      const payload = JSON.stringify(out);
+      if (Object.keys(out).length && payload !== last) {
+        last = payload;
+        void api.window("layout_targets", payload).catch(() => undefined);
+      }
+    };
+    const schedule = () => {
+      if (raf) return;
+      raf = window.requestAnimationFrame(() => { raf = 0; send(); });
+    };
+    send();
+    // 页内滚动后目标矩形会变，实机验收按真实滚动后重新上报
+    document.addEventListener("scroll", schedule, true);
+    window.addEventListener("resize", schedule);
+    return () => {
+      document.removeEventListener("scroll", schedule, true);
+      window.removeEventListener("resize", schedule);
+      if (raf) window.cancelAnimationFrame(raf);
+    };
+  }, [api, boot, snap, settings]);
+
+  useEffect(() => {
+    if (!window.location.hash.includes("selftest=power")) return;
+    if (!boot?.fake_power) return;   // 只有假执行器才允许自动自测
+    const t = window.setTimeout(async () => {
+      try {
+        const unconfirmed = await api.power("shutdown", false);
+        const confirmed = await api.power("shutdown", true);
+        await api.window("selftest_result", JSON.stringify({ unconfirmed, confirmed }));
+      } catch (e) {
+        await api.window("selftest_result", "ERR " + String(e));
+      }
+    }, 3500);
+    return () => window.clearTimeout(t);
+  }, [api, boot]);
+
+  useEffect(() => {
+    if (!window.location.hash.includes("selftest=export")) return;
+    const t = window.setTimeout(async () => {
+      try {
+        const r = await api.export_json(range);
+        await api.window("selftest_result", JSON.stringify(r));
+      } catch (e) {
+        await api.window("selftest_result", "ERR " + String(e));
+      }
+    }, 4000);
+    return () => window.clearTimeout(t);
+  }, [api, range]);
+
+  useEffect(() => {
+    if (!window.location.hash.includes("selftest=hide")) return;
+    const t = window.setTimeout(() => void api.window("hide"), 1500);
+    return () => window.clearTimeout(t);
+  }, [api]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") applyQuiet({ layout: "card" });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [applyQuiet]);
+
+  const doExport = useCallback(async () => {
+    try {
+      const r = await api.export_json(range);
+      setExportResult(r);
+      setNotice(`已导出 ${r.path}（${r.bytes} B，rev ${r.revision}）`);
+    } catch (e) {

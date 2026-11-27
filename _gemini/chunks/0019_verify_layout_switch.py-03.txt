@@ -1,0 +1,87 @@
+            def at():
+                st = read_status()
+                return st if st.get("layout") == expect else None
+
+            if wait_for(at, 5):
+                return
+            steps.append({"retry": name, "reason": f"5s 内布局未切到 {expect}，重发一次真实点击"})
+            time.sleep(0.4)
+            click_once(name)
+            if not wait_for(at, 6):
+                raise RuntimeError(f"{name} 点击后布局未切到 {expect}")
+
+        def verify(layout: str, shot: str) -> dict:
+            def at_layout():
+                st = read_status()
+                return st if st.get("layout") == layout and st.get("colorkey") is not None else None
+
+            d = wait_for(at_layout, 15)
+            if not d:
+                raise RuntimeError(f"布局未切到 {layout}")
+            work = (2560, 1540)
+            mons = data.get("monitors") or []
+            if mons:
+                l, t, r, b = mons[0]["work"]
+                work = (r - l, b - t)
+            ew, eh = expected(layout, scale, work)
+            end = time.time() + 8
+            while True:
+                rect = wt.RECT()
+                user32.GetWindowRect(wt.HWND(hwnd), ctypes.byref(rect))
+                w, h = rect.right - rect.left, rect.bottom - rect.top
+                if (w, h) == (ew, eh) or time.time() > end:
+                    break
+                time.sleep(0.25)
+            if (w, h) != (ew, eh):
+                observed.append({"layout": layout, "expected": [ew, eh], "actual": [w, h]})
+                raise RuntimeError(f"{layout} 尺寸 {w}x{h} != {ew}x{eh}")
+            status_rect = tuple(d.get("rect") or ())
+            actual_rect = (rect.left, rect.top, rect.right, rect.bottom)
+            if status_rect and status_rect != actual_rect:
+                raise RuntimeError(f"{layout} 状态矩形 {status_rect} 与实机 {actual_rect} 不一致")
+            cx, cy = (rect.left + rect.right) // 2, (rect.top + rect.bottom) // 2
+            ok, how = hit_inside(hwnd, cx, cy)
+            if not ok:
+                raise RuntimeError(
+                    f"{layout} 中心点未命中主窗口（鼠标穿透） point=({cx},{cy}) "
+                    f"method={how} main={hwnd}")
+            want_mode = "region" if layout == "card" else "alpha"
+            if d.get("hollow_mode") != want_mode:
+                raise RuntimeError(f"{layout} hollow_mode={d.get('hollow_mode')} 期望 {want_mode}")
+            cap = WindowOps(hwnd).capture(SHOTS / f"layout-{label}-{shot}.png")
+            if not cap.get("ok") or (cap.get("w"), cap.get("h")) != (ew, eh):
+                raise RuntimeError(f"{layout} 截图失败 {cap}")
+            row = {"layout": layout, "rect": [rect.left, rect.top, rect.right, rect.bottom],
+                   "hit_ok": True, "hit_method": how,
+                   "colorkey": d.get("colorkey"), "capture": cap}
+            steps.append(row)
+            return row
+
+        verify("card", "card")
+        click("expand", "insights")
+        verify("insights", "insights")
+        click("range7")
+        time.sleep(0.8)
+        verify("insights", "insights-7d")
+        click("diagnostics", "diagnostics")
+        verify("diagnostics", "diagnostics")
+        click("settings", "settings")
+        verify("settings", "settings")
+        click("insights", "insights")
+        verify("insights", "insights-back")
+        click("collapse", "card")
+        verify("card", "card-back")
+        return {"label": label, "dpi": dpi or "system", "scale": scale, "required": required,
+                "steps": steps, "ok": True}
+    except Exception as exc:
+        return {"label": label, "dpi": dpi or "system", "scale": scale, "required": required,
+                "steps": steps, "observed": observed, "ok": False, "error": repr(exc)}
+    finally:
+        stop(proc, read_status())
+
+
+def main() -> int:
+    dpi_aware()          # 必须在任何 SetCursorPos/WindowFromPoint 之前
+    SHOTS.mkdir(parents=True, exist_ok=True)
+    specs = [("sys", None, True), ("dpi96", 96, False), ("dpi144", 144, False)]
+    want = set(sys.argv[1:]) or {s[0] for s in specs}

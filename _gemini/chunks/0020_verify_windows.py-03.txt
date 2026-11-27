@@ -1,0 +1,80 @@
+    check("multi_monitor", len(mons) >= 1, [m["device"] for m in mons])
+    check("work_area", len(data.get("work_area") or []) == 4, data.get("work_area"))
+
+    if hwnd:
+        time.sleep(args.wait)
+        ops = WindowOps(hwnd)
+        state = ops.layered_state()
+        check("layered", state["layered"], state)
+        check("alpha", state["alpha"] > 0 and (state["flags"] & 2) != 0, state)
+        check("topmost", ops.is_topmost(), ops.is_topmost())
+        if args.hidden:
+            for _ in range(40):
+                try:
+                    data = json.loads(runtime.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    data = data
+                if data.get("hidden"):
+                    break
+                time.sleep(0.25)
+        else:
+            time.sleep(1.0)
+        vis = bool(user32.IsWindowVisible(wt.HWND(hwnd)))
+        check("visible", (not vis) if args.hidden else vis, vis)
+        if args.hidden:
+            # 隐藏后唯一找回入口是托盘：必须注册成功且仍存在，且没有任何圆点窗口
+            check("tray_available_when_hidden", bool(data.get("tray_added")), {
+                "tray_added": data.get("tray_added"),
+                "tray_hwnd": data.get("tray_hwnd"),
+                "tray_getrect_rc": data.get("tray_getrect_rc")})
+            check("no_dot_when_hidden", find_owned("cc-hud-dot", own_pid) == 0,
+                  find_owned("cc-hud-dot", own_pid) or None)
+        if not args.hollow:
+            ops.set_alpha(1.0)
+        time.sleep(0.35)
+        if args.screen or args.hollow:
+            from PIL import ImageGrab
+            rect = wt.RECT()
+            user32.GetWindowRect(wt.HWND(hwnd), ctypes.byref(rect))
+            time.sleep(0.4)  # 镂空态不要再用 alpha 覆盖，保持区域/颜色键
+            img = ImageGrab.grab(bbox=(rect.left, rect.top, rect.right, rect.bottom), all_screens=True)
+            img.save(shot)
+            cap = {"ok": True, "method": "ImageGrab", "w": img.width, "h": img.height,
+                   "max_luma": img.convert("L").getextrema()[1], "path": str(shot)}
+            if args.hollow:
+                px = list(img.convert("RGB").getdata())
+                bg = sum(1 for q in px if abs(q[0] - 11) <= 2 and abs(q[1] - 14) <= 2 and abs(q[2] - 20) <= 2)
+                inv = sum(1 for q in px if abs(q[0] - 255) <= 2 and abs(q[1] - 255) <= 2 and abs(q[2] - 255) <= 2)
+                cap["bg_pixels"] = bg
+                cap["area"] = len(px)
+                state = ops.layered_state()
+                rgn = ops.region_state()
+                # 颜色键会让 WebView2 子窗整窗穿透（按钮点不到），改用圆角窗口区域 + alpha
+                check("hollow_transparent", (state["flags"] & 1) != 0 or rgn in (2, 3),
+                      {"layered": state, "region_type": rgn})
+                # 圆角外四角必须是“窗口后面的画面”，不能是窗口自身的背景色；
+                # 不能用全图同色像素占比——UI 自身的深色（如 10,13,22）会落进容差带造成假阳性。
+                corners = [(2, 2), (img.width - 3, 2), (2, img.height - 3),
+                           (img.width - 3, img.height - 3)]
+                corner_px = [img.getpixel(c) for c in corners]
+                native = [c for c in corner_px
+                          if abs(c[0] - 11) <= 2 and abs(c[1] - 14) <= 2 and abs(c[2] - 20) <= 2]
+                check("hollow_corners_transparent", not native,
+                      {"corners": corner_px, "native_bg_hits": len(native),
+                       "bg_pixels": bg, "inv_pixels": inv})
+            if not args.hollow:
+                ops.set_alpha(float(data.get("alpha_setting") or 0.96))
+        else:
+            cap = ops.capture(shot)
+        check("capture", cap.get("ok") and cap.get("max_luma", 0) > 10, cap)
+    else:
+        for name in ("layered", "alpha", "topmost", "visible", "capture"):
+            check(name, False, "no hwnd")
+
+    if hwnd:
+        user32.PostMessageW(wt.HWND(hwnd), 0x0010, 0, 0)  # WM_CLOSE
+    for _ in range(20):
+        if proc.poll() is not None:
+            break
+        time.sleep(0.3)
+    if own_pid:

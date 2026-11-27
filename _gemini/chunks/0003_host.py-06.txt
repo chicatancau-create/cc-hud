@@ -1,0 +1,96 @@
+            "monitors": monitors(),
+            "work_area": list(work_area(hwnd)),
+        })
+        # HWND + WindowOps 建立 = 宿主可用；下面几步全是可降级的外观/附属物。
+        self.status["host_ready"] = True
+        self.status["step_errors"] = {}
+        self._run_step("js_zoom", self._apply_js_zoom)
+        self._run_step("layout_size", lambda: self._apply_layout_size(self.settings))
+        # 只有「窗口应用」做一次延迟重试：首帧渲染后框架会再走一遍布局，需要重新钉回去。
+        # 托盘/圆点不重试——重复创建会多出一个图标/窗口。
+        self._run_step("window_apply", lambda: self.apply_settings(self.settings),
+                       retry_fn=self._reapply_window)
+        self._run_step("probe", self._probe_native_state)
+        # 托盘必须在 ready 之前落账：删除圆点后它是唯一找回入口，
+        # 状态文件先报 ready 会让验收工具读到 tray_added=None 而误判。
+        self._run_step("tray", self._start_tray_now)
+        self.status["ready"] = True
+        self.status["bench"] = bench_marks()
+        with self._init_lock:
+            self._initialized = True
+        self._write_status()
+        if os.environ.get("CC_HUD_START_HIDDEN"):
+            self._log("selftest hide armed (JS-triggered)")
+
+    # ---- 启动步骤 ----
+    def _run_step(self, name: str, fn, retry_fn=None) -> bool:
+        """跑一个启动步骤；异常只记进 status["step_errors"]，不向上抛、不拖垮其他步骤。"""
+        try:
+            fn()
+        except Exception as exc:
+            self._record_step_error(name, exc)
+            if retry_fn is not None:
+                self._schedule_step_retry(name, retry_fn)
+            return False
+        return True
+
+    def _record_step_error(self, name: str, exc: BaseException) -> None:
+        errs = self.status.setdefault("step_errors", {})
+        if not isinstance(errs, dict):
+            errs = self.status["step_errors"] = {}
+        errs[name] = repr(exc)
+        self._log(f"step {name} failed: {exc!r}")
+
+    def _schedule_step_retry(self, name: str, fn) -> None:
+        """每个步骤最多一次延迟重试（GUI 线程、~1.0s 后）。"""
+        with self._init_lock:
+            threads = getattr(self, "_retry_threads", None)
+            if threads is None:
+                threads = self._retry_threads = {}
+            if name in threads:
+                return
+            thread = threading.Thread(target=self._retry_later, args=(name, fn), daemon=True)
+            threads[name] = thread
+        thread.start()
+
+    def _retry_later(self, name: str, fn) -> None:
+        time.sleep(float(getattr(self, "_retry_delay", 1.0)))
+        if not self._alive or not self.ops:
+            return
+        self._schedule_on_gui(lambda: self._retry_on_gui(name, fn))
+
+    def _retry_on_gui(self, name: str, fn) -> None:
+        try:
+            fn()
+        except Exception as exc:
+            self._record_step_error(name, exc)
+            self.status.setdefault("step_retry_failed", {})[name] = repr(exc)
+            self._write_status()
+            return
+        errs = self.status.get("step_errors")
+        prev = errs.pop(name, None) if isinstance(errs, dict) else None
+        # 重试成功也不抹掉「曾经失败过」：历史留在 step_recovered，当前错误表里才移除。
+        self.status.setdefault("step_recovered", {})[name] = prev or "ok"
+        self._log(f"step {name} retry ok")
+        self._write_status()
+
+    def _apply_js_zoom(self) -> None:
+        """pywebview 按物理像素建窗、WebView2 又按系统缩放渲染 -> 右侧被裁。
+        用 CSS zoom 反比补偿，使布局视口与窗口一致。"""
+        self.status["dpr"] = self.window.evaluate_js("window.devicePixelRatio")
+        self.status["inner_width"] = self.window.evaluate_js("window.innerWidth")
+        self.window.evaluate_js(
+            "document.documentElement.style.zoom = String(1 / (window.devicePixelRatio || 1))")
+
+    def _probe_native_state(self) -> None:
+        self.status["layered"] = self.ops.layered_state()
+        self.status["topmost"] = self.ops.is_topmost()
+
+    def _reapply_window(self) -> None:
+        """「窗口应用」步骤的延迟重试：尺寸钉回目标 + 效果重新应用一次。
+
+        首帧渲染完成后 WinForms/WebView2 会再走一遍布局，光重设效果不够。"""
+        self._apply_layout_size(self.settings)
+        self.apply_settings(self.settings)
+
+    def menu_items(self) -> list[dict]:

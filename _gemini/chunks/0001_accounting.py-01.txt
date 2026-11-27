@@ -1,0 +1,106 @@
+"""合并九路：整路拒绝（会话 id 交集）、只补缺口、守恒校验、模型/应用聚合。"""
+from __future__ import annotations
+
+import time
+from typing import Any
+
+from .model import (
+    STATUS_EMPTY,
+    STATUS_ERROR,
+    STATUS_OK,
+    STATUS_UNSUPPORTED,
+    SourceSnapshot,
+    new_day,
+    token_total,
+)
+from .paths import Paths
+from .ranges import RANGES, start_date
+from .sources import cchaha, ccswitch, codex, dsh, herdsman, qoder, workbuddy, zcode
+
+GAP_SOURCES = {"codex", "dsh", "dsh_v4"}
+
+
+def _as_list(value) -> list[SourceSnapshot]:
+    return list(value) if isinstance(value, (list, tuple)) else [value]
+
+
+def collect(paths: Paths, rng: str, now: float | None = None) -> list[SourceSnapshot]:
+    if rng not in RANGES:
+        raise ValueError(f"unknown range: {rng}")
+    now = time.time() if now is None else now
+    base = ccswitch.load(paths, rng, now)
+    counted: set[str] = set(base.sids)
+    # sid -> 先把它计入合计的那一路；被抑制时 by 要指向真正的冲突来源（不能写死 ccswitch）
+    owner: dict[str, str] = {sid: base.key for sid in base.sids}
+    out: list[SourceSnapshot] = [base]
+
+    def credit(snap: SourceSnapshot) -> None:
+        for sid in snap.sids:
+            counted.add(sid)
+            owner.setdefault(sid, snap.key)
+
+    for mod in (cchaha, qoder, zcode, herdsman, codex, workbuddy, dsh):
+        for snap in _as_list(mod.load(paths, rng, now, exclude_sids=counted)):
+            snap.finish()
+            if snap.status in (STATUS_UNSUPPORTED, STATUS_ERROR):
+                out.append(snap)
+                continue
+            if snap.key in GAP_SOURCES:
+                credit(snap)
+                out.append(snap)
+                continue
+            clash = snap.sids & counted
+            if clash:
+                by = sorted({owner.get(sid, "unknown") for sid in clash})
+                snap.suppressed = {"by": by[0], "clash": len(clash), "by_all": by}
+                snap.days.clear()
+                out.append(snap)
+                continue
+            credit(snap)
+            out.append(snap)
+    return out
+
+
+def merge(sources: list[SourceSnapshot], rng: str, now: float | None = None) -> dict[str, Any]:
+    """把未 suppressed 的来源按天合并；所有合计都可回溯到来源。"""
+    now = time.time() if now is None else now
+    included = [s for s in sources if not s.suppressed and s.status == STATUS_OK]
+    days: dict[str, dict] = {}
+    total_cost_supported = any(s.supports_cost for s in included)
+    total_credits_supported = any(s.supports_credits for s in included)
+
+    for s in included:
+        for date, d in s.days.items():
+            tgt = days.setdefault(date, new_day())
+            tgt["reqs"] += int(d["reqs"])
+            tgt["credits"] += float(d["credits"])
+            tgt["fresh_in"] += int(d["fresh_in"])
+            tgt["out"] += int(d["out"])
+            tgt["cache_read"] += int(d["cache_read"])
+            tgt["cache_write"] += int(d["cache_write"])
+            tgt["cost"] += float(d["cost"])
+            tgt["hours"] = [a + int(b) for a, b in zip(tgt["hours"], d["hours"])]
+            for name, m in d["models"].items():
+                mm = tgt["models"].setdefault(
+                    name, {"reqs": 0, "fresh_in": 0, "out": 0, "cache_read": 0,
+                           "cache_write": 0, "cost": 0.0})
+                for k in ("reqs", "fresh_in", "out", "cache_read", "cache_write"):
+                    mm[k] += int(m.get(k) or 0)
+                mm["cost"] += float(m.get("cost") or 0.0)
+
+    totals = {
+        "reqs": 0, "credits": 0.0, "fresh_in": 0, "out": 0,
+        "cache_read": 0, "cache_write": 0, "cost": 0.0, "tokens": 0,
+    }
+    for d in days.values():
+        totals["reqs"] += int(d["reqs"])
+        totals["credits"] += float(d["credits"])
+        for k in ("fresh_in", "out", "cache_read", "cache_write"):
+            totals[k] += int(d[k])
+        totals["cost"] += float(d["cost"])
+    totals["tokens"] = sum(totals[k] for k in ("fresh_in", "out", "cache_read", "cache_write"))
+
+    daily = []
+    for date in sorted(days):
+        d = days[date]
+        daily.append({

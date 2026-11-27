@@ -1,0 +1,42 @@
+- 多屏环境取证：`EnumDisplayDevices`/`EnumDisplaySettings` 只读枚举显示本机仅 `\\.\DISPLAY21` 已挂载且有模式；
+  NVIDIA 其余输出与 MuMu 虚拟显示适配器（DISPLAY10–19）均无模式、无子显示器，无法在不装驱动的前提下构造第二块屏。
+
+
+## 33. 本机整体替换（2026-11-08 10:16-10:20 本地）
+
+按用户要求不再保留旧 tkinter 入口，做本机一次性替换：
+
+- 迁移：`hud-state.json` → `hud-next-state.json`（alpha 0.96、hollow=true、range 2→`30d`、topmost/peek 默认开）；托盘模块 `cchud/sysw.py` → `cchud_next/tray.py`（仅 stdlib+Pillow），`host.py`/`tests_py/test_tray_struct.py` 改引用。
+- 入口：`start-hud.bat` 重写为 `.venv\Scripts\pythonw.exe cc-hud.pyw`（自检 dist/pywebview）；删除 `cc-hud-next.pyw`、`start-hud-next.bat`；快捷方式 `E:\DeskBox\编程工具\CC Switch HUD.lnk` 由 `pythonw cc-hud.pyw` 重定向到 `start-hud.bat`。
+- 删除：`cchud/`、`verify.py`、`follow-probe.pyw`、`shot.py`、`test_data.py`、`历史会话/`、根目录旧截图与 `hud-state.json`；工具脚本中的 `cc-hud-next.pyw` 引用同步改为 `cc-hud.pyw`。
+- 实机证据：旧实例（PID 47936，11-07 17:29 起）已停；`start-hud.bat` 启动后 runtime `ready=true`、`layered=true`、`topmost=true`、`dot_placed=true`、`tray_added=true`，`artifacts/windows/REPLACED-card.png`（424×420，PrintWindow，max_luma 236）显示新版小卡与真实数据；再经 `.lnk` 重启（PID 2828）复验窗口可见、截图成功，`tools/verify_installed.py` ok=true。
+- 行为补齐：`main()` 加单实例闸门（`tray.already_running()`）；`_watch_ccswitch` 每 5s 探 CC Switch，见到过再消失（10s 宽限）即走 GUI 线程销毁窗口跟随退出。实测：HUD 运行中再双击 `start-hud.bat`，进程链仍只有 1 个宿主（63076→49428），窗口未叠出第二份。
+- 门禁：`pytest tests_py -q` 61 passed；`npm run lint/typecheck` 0；`npm test` 16 passed；`npm run build` 成功；Playwright 10 passed；`tools/reconcile.py` 四范围 `bad=none`。
+- 新入口实机复验：`tools/verify_windows.py --layout card --wait 26` 全 PASS（`REPLACE-verify-card.png`，515×737，max_luma 236）；`--layout insights` 全 PASS（`REPLACE-verify-insights.png`，2051×1260，max_luma 237），大面板显示真实九路数据与 35 个活跃日。
+- 单实例对验收工具的影响：`final_acceptance.py` 增加 `hud_running` 预检；工具全部改指 `cc-hud.pyw`。预检最初用 `FindWindowW(None,"cc-hud")` 误判——该标题会命中 explorer 的 `Windows.Internal.Shell.TabProxyWindow`（PID 10644），已改为 `OpenMutexW("Local\cc-hud-single")`。
+
+## 34. 替换后完整验收（2026-11-08T02:33Z）
+
+`python tools/final_acceptance.py`（先退出常驻 HUD；互斥体预检通过）→ `artifacts/final-acceptance.json`：
+
+- rc=0（17 项）：`pytest`、`reconcile`、`lint`、`typecheck`、`vitest`、`build`、`playwright`、`verify_card`、`verify_insights`、`verify_diagnostics`、`verify_settings`、`verify_peek`、`verify_hollow`、`verify_export`、`verify_power`、`tray_click`、`settings_persist`。
+- rc=1：`tray_pixel`（图标像素仍不可见，Shell 侧环境）。
+- blocked：`multi_monitor`（本机仅 `\.\DISPLAY21`）。
+- 结束后从快捷方式恢复常驻实例：runtime pid 62104，`tools/verify_installed.py` ok=true（424×420，max_luma 236）。
+- 2026-11-08T02:35Z 对运行中新宿主复核托盘：溢出面板 11 项无 cc-hud。
+- 2026-11-08T02:37Z 托盘根因排查（**推翻此前“Shell 环境拒绝”的结论**）：
+  1) 最小探针用隐藏**顶层**工具窗注册同一图标，`NIM_ADD=1` 且 `GetRect=0`（rect 非零）→ 原实现的 `HWND_MESSAGE`（message-only）收不到广播，是 bug 之一；已改为 `WS_EX_TOOLWINDOW` 顶层窗。
+  2) 进一步对照发现 `Tray` 从未给 `nid.uID` 赋值（默认 0），而 `GetRect` 查询用 1 → 图标注册标识不一致；已设为 1，并统一用 `self.nid.uID`。
+  3) 修复后宿主 `tray_getrect_rc=0`（此前恒为 E_FAIL），但该 rect 不可作为“已注册”的证据：同一进程内用股票图标、自绘图标、不同 `uID` 注册，`GetRect` 都返回同一 rect `[2038,1540,2078,1600]`，而该槽位实测 max_luma=255（是别的图标）。`NotifyIconSettings` 无 `.venv` 条目、溢出面板 UIA 仍无 cc-hud → 图标实际未被 Shell 接受/未提升，像素门禁不通过。
+  4) 重启 explorer 后未见重注册（已加 TaskbarCreated 重加逻辑，但本机未观测到生效）；重新从快捷方式启动可恢复 `GetRect=0`。
+  - 试过把托盘建在 `webview.start` 前的主线程（与探针一致）：图标注册无改善，反而 `WM_TRAY` 不再被派发（tray_click `hidden_after_click=false`），已回退为 GUI 线程创建。
+  - 2026-11-08T02:46Z 注册表对照：`HKCU\Control Panel\NotifyIconSettings` 共 117 项（含其他应用与旧 `D:\PyCharm\Python\pythonw.exe`，后者 IsPromoted=0），**没有 `.venv\Scripts\pythonw.exe` 条目** → 可判定 Shell 未接受新宿主的图标，而非"已注册但隐藏"。
+  - 结论：两个代码 bug 已修，但图标仍未被 Shell 呈现；`GetRect` 在本机不是可靠判据。像素门禁保持不通过，需换机或用 UIA/注册表条目作为最终判据。回退后 `tools/tray_click.py` ok=true（隐藏/圆点/恢复）。
+
+结论：重构代码与入口均已在本机生效；仅剩双屏与托盘像素两条实机环境门禁未过，未标记为完成。
+
+### 35. 托盘根因更正（2026-11-08T02:52Z）
+
+- 宿主真实映像不是 `.venv\Scripts\pythonw.exe`，而是其子进程 `D:\PyCharm\Python\pythonw.exe`；
+  `HKCU\Control Panel\NotifyIconSettings\2591989311186454988`（该 exe）存在但 `IsPromoted=0`，继承自旧应用。
+- 置 `IsPromoted=1` 后，常驻实例 rect `[2038,1540,2078,1600]` 实测 36 个强调色像素（`artifacts/windows/tray-final.png`）→ 图标可见。

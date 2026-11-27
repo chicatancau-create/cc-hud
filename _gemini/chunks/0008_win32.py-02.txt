@@ -1,0 +1,94 @@
+                      monitor: int = 0, anchor: str = "top-right", margin: int = 16) -> tuple[int, int]:
+    """纯函数：在给定工作区列表里定位，越界夹取。便于在没有第二块屏时单测多屏分支。"""
+    if not work_areas:
+        raise ValueError("no work areas")
+    l, t, r, b = work_areas[min(max(0, monitor), len(work_areas) - 1)]
+    x = r - width - margin if "right" in anchor else l + margin
+    y = t + margin if "top" in anchor else b - height - margin
+    x = max(l, min(x, r - width - 4))
+    y = max(t, min(y, b - height - 4))
+    return int(x), int(y)
+
+
+class WindowOps:
+    """一个 HWND 的整窗效果。Windows 下绝不使用 pywebview transparent=True。"""
+
+    def __init__(self, hwnd: int):
+        self.hwnd = int(hwnd)
+
+    def set_alpha(self, alpha: float) -> bool:
+        a = max(0.0, min(1.0, float(alpha)))
+        ex = _get_exstyle(self.hwnd) | WS_EX_LAYERED
+        _set_exstyle(self.hwnd, ex)
+        return bool(user32.SetLayeredWindowAttributes(wt.HWND(self.hwnd), 0, int(a * 255), LWA_ALPHA))
+
+    def set_colorkey(self, colorref: int, alpha: float = 1.0) -> bool:
+        """颜色键镂空；与 alpha 同时生效（两标志位可并）。"""
+        ex = _get_exstyle(self.hwnd) | WS_EX_LAYERED
+        _set_exstyle(self.hwnd, ex)
+        return bool(user32.SetLayeredWindowAttributes(
+            wt.HWND(self.hwnd), wt.DWORD(colorref), int(max(0.0, min(1.0, alpha)) * 255),
+            LWA_COLORKEY | LWA_ALPHA))
+
+    def set_round_region(self, width: int, height: int, radius: int) -> bool:
+        """圆角窗口区域：区域外不参与命中测试（可点、无颜色键穿透）。"""
+        rgn = gdi32.CreateRoundRectRgn(0, 0, int(width) + 1, int(height) + 1,
+                                       int(radius), int(radius))
+        if not rgn:
+            return False
+        ok = bool(user32.SetWindowRgn(wt.HWND(self.hwnd), rgn, True))
+        if not ok:
+            gdi32.DeleteObject(rgn)
+        return ok
+
+    def clear_region(self) -> bool:
+        return bool(user32.SetWindowRgn(wt.HWND(self.hwnd), None, True))
+
+    def region_state(self) -> int:
+        """GetWindowRgn：0=无区域/失败，1=NULL，2=SIMPLE，3=COMPLEX。"""
+        rgn = gdi32.CreateRectRgn(0, 0, 0, 0)
+        try:
+            return int(user32.GetWindowRgn(wt.HWND(self.hwnd), rgn))
+        finally:
+            gdi32.DeleteObject(rgn)
+
+    def clear_layered(self) -> bool:
+        ex = _get_exstyle(self.hwnd) & ~WS_EX_LAYERED
+        _set_exstyle(self.hwnd, ex)
+        return True
+
+    def layered_state(self) -> dict:
+        ex = _get_exstyle(self.hwnd)
+        key = wt.DWORD(0)
+        alpha = wt.BYTE(0)
+        flags = wt.DWORD(0)
+        ok = user32.GetLayeredWindowAttributes(wt.HWND(self.hwnd), ctypes.byref(key),
+                                               ctypes.byref(alpha), ctypes.byref(flags))
+        return {"layered": bool(ex & WS_EX_LAYERED), "alpha": alpha.value,
+                "colorkey": key.value, "flags": flags.value, "read_ok": bool(ok)}
+
+    def set_topmost(self, on: bool) -> bool:
+        user32.SetWindowPos.argtypes = [wt.HWND, wt.HWND, ctypes.c_int, ctypes.c_int,
+                                        ctypes.c_int, ctypes.c_int, wt.UINT]
+        return bool(user32.SetWindowPos(wt.HWND(self.hwnd), HWND_TOPMOST if on else HWND_NOTOPMOST,
+                                        0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE))
+
+    def is_topmost(self) -> bool:
+        return bool(_get_exstyle(self.hwnd) & WS_EX_TOPMOST)
+
+    def place(self, width: int | None = None, height: int | None = None, monitor: int = 0,
+              anchor: str = "top-right", margin: int = 16, keep_size: bool = True) -> dict:
+        """搬位置 / 改尺寸，并回读真实矩形。
+
+        SetWindowPos 的返回值必须检查：WinForms 会按 Min/Max 夹取、WebView2 还会在
+        首帧后异步重排，结果和请求值并不总是相等。旧实现直接回显请求值，导致宿主侧
+        「尺寸是否生效」的校验恒真（熔断永不触发）。这里返回 GetWindowRect 的实际
+        w/h 与 ok，让调用方拿真实值比对。
+        """
+        mons = monitors()
+        mi = mons[min(monitor, max(0, len(mons) - 1))] if mons else None
+        if mi:
+            l, t, r, b = mi["work"]
+        else:
+            l, t, r, b = work_area()
+        rect = wt.RECT()

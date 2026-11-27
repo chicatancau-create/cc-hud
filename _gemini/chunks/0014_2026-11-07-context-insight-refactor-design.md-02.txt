@@ -1,0 +1,91 @@
+  "suppressed": null
+}
+```
+
+`suppressed` 非空表示该路因会话 id 与已计入来源交集而被整路拒绝并入：
+`{"by":"ccswitch","clash":3}`。此时 `totals` 仍报告该路自身读数，但**不进入合计**。
+
+### 4.3 Snapshot（桥接返回）
+
+```json
+{
+  "schema": 1,
+  "revision": 12,
+  "seq": 7,
+  "range": "7d",
+  "generated_at": 1792590000.0,
+  "status": "ok",
+  "totals": { ...同上... },
+  "kpis": {"sessions":0,"active_days":0,"cost":null,"tokens":0,
+           "cache_hit":null,"credits":0.0},
+  "daily": [{"date":"2026-11-07","tokens":0,"reqs":0,"cost":0.0,"fresh_in":0,
+             "out":0,"cache_read":0,"cache_write":0}],
+  "hourly": [{"hour":0,"reqs":0,"tokens":0,"cost":0.0}],
+  "models": [{"name":"...","reqs":0,"tokens":0,"cost":0.0,"sources":["ccswitch"]}],
+  "apps": [{"key":"claude","name":"Claude Code","reqs":0,"tokens":0,"cost":0.0}],
+  "sources": [SourceSnapshot...],
+  "conservation": [{"name":"totals_eq_days","ok":true,"detail":"..."}],
+  "cache": {"hits":0,"misses":0,"entries":1,"capacity":8}
+}
+```
+
+`cost: null` 表示来源不支持成本（≠ 0）。`cache_hit: null` 表示分母为 0。
+
+### 4.4 桥接方法（pywebview js_api）
+
+| 方法 | 入参 | 出参 |
+|---|---|---|
+| `bootstrap()` | — | `{version, ranges, settings, sources_meta, dpi, platform}` |
+| `snapshot(range, seq)` | `1d/7d/30d/all`, 递增序号 | Snapshot（`seq` 回显） |
+| `detail(source_key, range)` | | `{source, days, models}` |
+| `get_settings()` / `set_settings(patch)` | | 校验后的设置 |
+| `export_json(range)` | | `{path, bytes, revision}` |
+| `power(action, confirmed)` | `sleep/shutdown/restart/...` | `{ok, scheduled, action}`；`confirmed!=true` 拒绝 |
+| `window(action, value)` | `alpha/topmost/peek/layout` | `{ok, value}` |
+| `open_debug()` | | `{ok, log_path}` |
+
+## 5. 记账规则（守恒与双计防护）
+
+1. **基础路**：CC Switch 代理日志是基准。`fresh_in = input - codex_session.cache_read`；
+   `tokens = fresh_in + out + cache_read + cache_write`。
+2. **整路拒绝**：cc-haha / Qoder / Qoder CN / ZCode / 牧羊人 / WorkBuddy（国内、国外）在并入前，
+   若其会话 id 与「已计入来源」的会话 id 有交集，则整路不并入，记 `suppressed`。
+3. **只补缺口**：Codex 与 DSH 只并入 CC Switch 未记录的会话（`have_sids`）；同一会话内部不补。
+4. **全局去重**：cc-haha / Qoder 的 transcript 可能被 fork 抄写，按 message id 跨文件全局去重；
+   WorkBuddy 每行 `rawUsage` 唯一。
+5. **WorkBuddy 口径**：`prompt_tokens` 含缓存读与缓存写，净输入 = `prompt - cache_read - cache_write`；
+   国外版 `credits` 两本账矛盾 → 不并入。
+6. **ZCode**：`input` 含缓存读，净输入需减；`out` 含 reasoning。
+7. **Codex**：取每个 rollout 最后一条 `total_token_usage`；`input` 含 `cached_input_tokens`，需减。
+8. **DSH projcache**：`uncachedInputTokens` 已是净输入；`turns` 为请求数；按 `createdAt` 归日（近似）。
+9. **守恒断言**（每范围、每来源）：
+   - `totals == Σdays`（四项、请求、成本、credits）；
+   - `Σhours == totals.reqs`（按来源）；
+   - `daily.tokens == fresh_in + out + cache_read + cache_write`；
+   - `cache_hit = cache_read / (cache_read + fresh_in + cache_write)`，分母 0 → `null`；
+   - 模型表 `Σmodel.tokens` ≤ 总量（CC Switch 只列前 4 时允许小于，但**不得大于**）。
+10. **成本**：只有 CC Switch 与 cc-haha 有真实美元成本；其余记 `cost=0` 且 source 标注“本机不记钱/无定价”，
+    面板不得把“无成本”显示成“$0.00 已计价”。
+
+## 6. UI 规格（Context Insights 高保真）
+
+参考 `6d55c2f` 的实现，取其结构与视觉，不取其运行时。
+
+- 页面骨架：`header`（标题 + 范围胶囊 + 刷新/导出）→ `first`（6 KPI + 用量卡）→ `stats`（token 环形图 + 模型/应用拆分）
+  → `tiles`（热力图 / 技能或工具计数 / 来源状态 / 会话数）→ `grid`（来源卡片：九路各一张，含状态与守恒结果）。
+- 布局：容器查询；`>=932px` 两列首带；`>=640px` 四列 tiles；`<=560px` 单列；卡片半径 10–12px，间距 8–10px。
+- 颜色：深色底 `#0b0e14`，卡片 `#10131d`/`#171a24`，描边 `#262b36`，文字 `#e8edf5/#8a97a8/#7f8b9e/#757f93`；
+  分类色：系统 indigo、工具 amber、用户 green、注入 purple、技能 orange、助手 blue、工具调用 teal；
+  来源色按 key 稳定哈希。
+- 字体：13px 基准，KPI 20/600，标签 11/600，刻度 9px，数字 `tabular-nums`；等宽仅用于路径/模型 id。
+- 图表：手写 SVG/CSS（环形图、柱状、热力图），不引第三方图表库。
+- 状态：加载骨架；`empty` 文案“本期无记录”；`unsupported` 文案“来源不支持/未安装”+ 原因；
+  `error` 文案“读取失败”+ 原因；真实 0 正常显示 0。
+- 小卡：范围胶囊、今日成本/请求/真实 token/命中率、1 小时、按应用条形、状态底栏；点击展开大面板。
+- 诊断视图：每路状态、路径、原因、`suppressed`、守恒逐条、revision、缓存命中/容量、SQLite 打开方式。
+- 设置：透明度（5 档）、置顶、圆点、主题、导出、电源动作（二次确认，测试用注入器）。
+
+## 7. 安全与生命周期
+
+- SQLite 一律 `mode=ro` URI + `PRAGMA query_only=ON` + `busy_timeout` + `finally close()`（ZCode 旧实现缺 finally，本版修复）。
+- 不打开：`providers.settings_config`、`universal_providers`、`providers.json`、`auth.json`、`.credentials.yaml`、API Key 字段。

@@ -1,0 +1,37 @@
+            warm.append(run_once(root, profile, args.settle, pyw))
+    finally:
+        _kill_running()
+        shutil.rmtree(profile, ignore_errors=True)
+
+    result = {
+        "label": args.label,
+        "root": str(root),
+        "method": {
+            "cold": "每轮先结束 HUD 并删除 profile 目录；测 Popen -> runtime.json ready=true",
+            "warm": "复用同一 profile 目录（WebView2 缓存命中）；同样测 Popen -> ready",
+            "median": "statistics.median",
+            "rss": "ready 后 settle 秒取 PrivateMemorySize64",
+        },
+        "cold": summarize(cold),
+        "warm": summarize(warm),
+        "dot_created_seen": sorted({str(r.get("dot_created")) for r in cold + warm}),
+    }
+    ok = bool(result["cold"]["ready_ms_median"]) and bool(result["warm"]["ready_ms_median"])
+    result["ok"] = ok
+    out = Path(args.out) if args.out else (
+        OUT.with_name(f"startup-bench-{args.label}.json") if args.label != "current" else OUT)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    brief = {
+        "ok": ok,
+        "label": args.label,
+        "cold": {k: v for k, v in result["cold"].items() if k != "rows"},
+        "warm": {k: v for k, v in result["warm"].items() if k != "rows"},
+        "dot_created_seen": result["dot_created_seen"],
+    }
+    print(json.dumps(brief, ensure_ascii=False))
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

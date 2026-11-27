@@ -1,0 +1,110 @@
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import { App } from "./App";
+import { stubBootstrap, stubSnapshot } from "./api/stub";
+import type { HudApi, RangeKey, Settings } from "./types";
+
+const cardSettings: Settings = {
+  alpha: 0.96, topmost: true, peek: true, range: "7d", layout: "card", theme: "dark", hollow: false
+};
+
+interface PendingCall {
+  patch: Partial<Settings>;
+  resolve: (s: Settings) => void;
+  reject: (e: unknown) => void;
+}
+
+interface BridgeOpts {
+  layout?: Settings["layout"];
+  bootRange?: RangeKey;
+  /** 任何 layout 写入都失败（原生 resize 失败） */
+  failLayout?: boolean;
+  /** 这些 range 的写入失败 */
+  failRanges?: RangeKey[];
+  /** 手动模式：set_settings 返回挂起的 promise，由测试决定成败与回包内容（竞态用例） */
+  manual?: boolean;
+}
+
+function makeApi(opts: BridgeOpts = {}) {
+  let current: Settings = {
+    ...cardSettings,
+    layout: opts.layout ?? "card",
+    range: opts.bootRange ?? "7d"
+  };
+  const pending: PendingCall[] = [];
+  const calls: Partial<Settings>[] = [];
+  const cmds: string[] = [];
+  const resolveSettings = (patch: Partial<Settings>) => {
+    current = { ...current, ...patch };
+    return current;
+  };
+  const api = {
+    bootstrap: async () => ({ ...stubBootstrap(), settings: current }),
+    snapshot: async (rng: RangeKey, seq: number) => stubSnapshot(rng, seq),
+    detail: async () => ({ source: null }),
+    get_settings: async () => current,
+    set_settings: (patch: Partial<Settings>) => {
+      calls.push(patch);
+      if (opts.manual) {
+        return new Promise<Settings>((resolve, reject) => { pending.push({ patch, resolve, reject }); });
+      }
+      if (opts.failLayout && patch.layout) return Promise.reject(new Error("native resize failed"));
+      if (patch.range && opts.failRanges?.includes(patch.range)) {
+        return Promise.reject(new Error(`range ${patch.range} 写入失败`));
+      }
+      return Promise.resolve(resolveSettings(patch));
+    },
+    export_json: async () => ({ ok: true, path: "", bytes: 0, revision: 1 }),
+    power: async () => ({ ok: true }),
+    cancel_power: async () => ({ ok: true }),
+    window: async () => ({ ok: true }),
+    menu_model: async () => ({ ok: true, items: menuItems(), settings: current }),
+    menu_command: async (id: string) => {
+      cmds.push(id);
+      if (id === "view.insights") {
+        current = { ...current, layout: "insights" };
+        return { ok: true, settings: current };
+      }
+      if (id === "range.30d") {
+        current = { ...current, range: "30d" };
+        return { ok: true, settings: current };
+      }
+      if (id === "action.refresh") return { ok: true };
+      return { ok: true };
+    }
+  } as unknown as HudApi;
+  return { api, pending, calls, cmds, current: () => current };
+}
+
+function menuItems() {
+  const leaf = (id: string, title: string, extra: Record<string, unknown> = {}) => ({
+    id, title, kind: "command", enabled: true, checked: false, danger: false, children: [], ...extra
+  });
+  return [
+    leaf("panel.toggle", "隐藏主面板"),
+    { ...leaf("submenu.view", "视图"), kind: "submenu", children: [
+      leaf("view.card", "小卡"), leaf("view.insights", "洞察"),
+      leaf("view.diagnostics", "诊断"), leaf("view.settings", "设置")
+    ] },
+    { ...leaf("submenu.range", "统计范围"), kind: "submenu", children: [leaf("range.30d", "30 天")] },
+    leaf("action.refresh", "刷新数据"),
+    leaf("app.quit", "退出程序", { danger: true })
+  ];
+}
+
+/**
+ * 未处理拒绝探测器。jsdom 里 window 的 `unhandledrejection` 不会触发（实测），
+ * 真正能观测到的是宿主 Node 的 `unhandledRejection`；vitest 自己也会把它算成
+ * run 级 error 并以非零码退出。所以两者都断言，保证这个用例能真红。
+ */
+function watchUnhandled() {
+  const seen: unknown[] = [];
+  const onReject = (reason: unknown) => { seen.push(reason); };
+  process.on("unhandledRejection", onReject);
+  return {
+    count: () => seen.length,
+    stop: () => { process.off("unhandledRejection", onReject); }
+  };
+}
+

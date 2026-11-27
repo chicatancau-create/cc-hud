@@ -1,0 +1,101 @@
+    await act(async () => { hook!("action.refresh"); await settle(0); });
+    await waitFor(() => expect(cmds).toContain("action.refresh"));
+  });
+});
+
+describe("首帧范围", () => {
+  it("bootstrap 返回前不请求快照；只按服务端 range 请求一次", async () => {
+    const { api } = makeApi({ layout: "card", bootRange: "7d" });
+    const spy = vi.spyOn(api, "snapshot");
+    await bootCard(api);
+    // 旧实现会先用本地默认 "1d" 扫一遍账本（5–8 秒），导致「按钮 7 天 + 数据 1 天」
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toBe("7d");
+    expect(screen.getByRole("button", { name: "7 天" })).toHaveClass("on");
+  });
+});
+
+describe("设置失败的调用点", () => {
+  it("Esc 与小卡切范围失败：提示可见、布局不动、无 unhandled rejection", async () => {
+    const { api } = makeApi({ layout: "card", bootRange: "1d", failLayout: true, failRanges: ["7d"] });
+    const spy = vi.spyOn(api, "set_settings");
+    const watch = watchUnhandled();
+    try {
+      await bootCard(api);
+
+      // App.tsx:190 —— Esc 收成小卡（resize 失败）
+      fireEvent.keyDown(window, { key: "Escape" });
+      await screen.findByText(/设置失败/);
+      await waitFor(() => expect(spy).toHaveBeenCalledWith({ layout: "card" }));
+      expect(screen.getByTestId("card-view")).toBeInTheDocument();
+
+      // App.tsx:243 —— 小卡范围胶囊（写入失败 → 回滚到已确认范围）
+      await userEvent.click(screen.getByRole("button", { name: "7 天" }));
+      await waitFor(() => expect(spy).toHaveBeenCalledWith({ range: "7d" }));
+      await waitFor(() => expect(screen.getByRole("button", { name: "今日" })).toHaveClass("on"));
+      expect(screen.getByRole("button", { name: "7 天" })).not.toHaveClass("on");
+
+      await settle();
+      expect(watch.count()).toBe(0);
+    } finally {
+      watch.stop();
+    }
+  });
+
+  it("大面板切范围失败：提示可见、范围回滚、无 unhandled rejection", async () => {
+    const { api } = makeApi({ layout: "insights", bootRange: "1d", failRanges: ["7d"] });
+    const spy = vi.spyOn(api, "set_settings");
+    const watch = watchUnhandled();
+    try {
+      window.pywebview = { api: api as never };
+      render(<App />);
+      await screen.findByTestId("insights");
+
+      // App.tsx:249 —— 大面板范围胶囊
+      await userEvent.click(screen.getByTestId("range-7d"));
+      await waitFor(() => expect(spy).toHaveBeenCalledWith({ range: "7d" }));
+      await screen.findByText(/设置失败/);
+      await waitFor(() => expect(screen.getByTestId("range-1d")).toHaveClass("on"));
+      expect(screen.getByTestId("range-7d")).not.toHaveClass("on");
+
+      await settle();
+      expect(watch.count()).toBe(0);
+    } finally {
+      watch.stop();
+    }
+  });
+});
+
+describe("范围切换竞态", () => {
+  it("先发的请求失败且已过时：range 不回滚到旧值，最终以最新一次的服务端回包为准", async () => {
+    const { api, pending } = makeApi({ layout: "card", bootRange: "1d", manual: true });
+    await bootCard(api);
+    expect(screen.getByRole("button", { name: "今日" })).toHaveClass("on");
+
+    // 两次快速切换：7 天 先发、30 天 后发（写请求串行，第二次排在第一次之后）
+    await userEvent.click(screen.getByRole("button", { name: "7 天" }));
+    await userEvent.click(screen.getByRole("button", { name: "30 天" }));
+    await waitFor(() => expect(pending).toHaveLength(1));
+    expect(pending[0].patch).toEqual({ range: "7d" });
+
+    // 先发的那次失败（此时它已经不是最新的请求）
+    await act(async () => {
+      pending[0].reject(new Error("7d 写入失败"));
+      await settle(0);
+    });
+    await waitFor(() => expect(pending).toHaveLength(2));
+    expect(pending[1].patch).toEqual({ range: "30d" });
+
+    // 最新一次成功，服务端权威范围 30d
+    await act(async () => {
+      pending[1].resolve({ ...cardSettings, layout: "card", range: "30d" });
+      await settle(0);
+    });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "30 天" })).toHaveClass("on"));
+    expect(screen.getByRole("button", { name: "7 天" })).not.toHaveClass("on");
+    expect(screen.getByRole("button", { name: "今日" })).not.toHaveClass("on");
+    // 过时的失败不该打扰用户
+    expect(screen.queryByText(/设置失败/)).not.toBeInTheDocument();
+  });
+});

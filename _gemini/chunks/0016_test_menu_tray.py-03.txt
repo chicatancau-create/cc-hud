@@ -1,0 +1,11 @@
+    got = SettingsStore(path).load()
+    assert got["layout"] == "insights"
+    assert got["peek"] is True                 # 键仍可读，但 UI 已不再提供
+    assert got["hollow"] is True
+
+
+def test_defaults_keep_peek_key_for_backwards_compat():
+    from cchud_next.settings import DEFAULTS, validate
+
+    assert "peek" in DEFAULTS
+    assert validate({"peek": False})["peek"] is False

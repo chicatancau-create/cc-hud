@@ -1,0 +1,117 @@
+"""Windows 实机验收：WebView2 起窗、DPI、alpha、置顶、托盘、圆点、多屏、截图。
+
+只报告实测；任何一项失败都以退出码 1 结束，不伪造。
+用法：python tools/verify_windows.py [--layout card|insights] [--shot NAME]
+"""
+from __future__ import annotations
+
+import argparse
+import ctypes
+import faulthandler
+import json
+import os
+import subprocess
+import tempfile
+import sys
+import time
+from ctypes import wintypes as wt
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from cchud_next.win32 import WindowOps, dpi_aware, monitors  # noqa: E402
+
+user32 = ctypes.WinDLL("user32", use_last_error=True)
+user32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+user32.GetWindowThreadProcessId.restype = wt.DWORD
+user32.GetWindowTextW.argtypes = [wt.HWND, wt.LPWSTR, ctypes.c_int]
+user32.EnumWindows.argtypes = [ctypes.c_void_p, wt.LPARAM]
+
+
+def process_dpi_awareness(pid: int) -> int | None:
+    shcore = ctypes.windll.shcore
+    val = ctypes.c_int()
+    h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+    if not h:
+        return None
+    try:
+        return val.value if shcore.GetProcessDpiAwareness(h, ctypes.byref(val)) == 0 else None
+    finally:
+        ctypes.windll.kernel32.CloseHandle(h)
+
+
+def owner_pid(hwnd: int) -> int:
+    pid = wt.DWORD()
+    user32.GetWindowThreadProcessId(wt.HWND(hwnd), ctypes.byref(pid))
+    return int(pid.value)
+
+
+def find_owned(title: str, pid: int) -> int:
+    for h, t, _cls in windows():
+        if t == title and owner_pid(h) == pid:
+            return h
+    return 0
+
+
+def windows() -> list[tuple[int, str, str]]:
+    out: list[tuple[int, str, str]] = []
+    PROC = ctypes.WINFUNCTYPE(ctypes.c_int, wt.HWND, wt.LPARAM)
+
+    def cb(hwnd, _lp):
+        buf = ctypes.create_unicode_buffer(256)
+        user32.GetWindowTextW(hwnd, buf, 256)
+        cls = ctypes.create_unicode_buffer(256)
+        user32.GetClassNameW(hwnd, cls, 256)
+        out.append((int(hwnd), buf.value, cls.value))
+        return 1
+
+    user32.EnumWindows(PROC(cb), 0)
+    return out
+
+
+def find(title: str) -> int | None:
+    for hwnd, text, _cls in windows():
+        if text == title:
+            return hwnd
+    return None
+
+
+def main() -> int:
+    dpi_aware()          # GetWindowRect/抓图必须是物理像素，否则 125% 下会被虚拟化成 0.8 倍
+    if os.environ.get("CC_HUD_STACK"):
+        faulthandler.dump_traceback_later(40, repeat=True)
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--layout", default="card")
+    ap.add_argument("--shot", default="windows-card")
+    ap.add_argument("--timeout", type=int, default=45)
+    ap.add_argument("--hidden", action="store_true", help="启动后隐藏，验证呼出圆点")
+    ap.add_argument("--wait", type=float, default=6.0, help="首次快照等待秒数")
+    ap.add_argument("--screen", action="store_true", help="改用整屏抓取后裁窗（交叉核对）")
+    ap.add_argument("--scroll", type=int, default=0, help="抓图前滚动 .page 的像素")
+    ap.add_argument("--selftest", default="", help="前端自测：hide|export")
+    ap.add_argument("--scale", default="", help="强制 WebView2 device scale（1 或 1.25）")
+    ap.add_argument("--hollow", action="store_true", help="背景镂空（LWA_COLORKEY）取证")
+    args = ap.parse_args()
+
+    runtime = ROOT / "artifacts" / "runtime.json"
+    shot = ROOT / "artifacts" / "windows" / f"{args.shot}.png"
+    if runtime.exists():
+        runtime.unlink()
+
+    # 不设 CC_HUD_SIZE：抓图必须走生产布局尺寸（尺寸由宿主按 DPI 换算）
+    env = dict(os.environ, CC_HUD_LAYOUT=args.layout,
+               CC_HUD_PROFILE=tempfile.mkdtemp(prefix="cchud-webview-"),
+               CC_HUD_MUTEX=rf"Local\cc-hud-verify-{os.getpid()}-{args.layout}")
+    if args.scroll:
+        env["CC_HUD_SCROLL"] = str(args.scroll)
+    if args.selftest:
+        env["CC_HUD_SELFTEST"] = args.selftest
+    if args.scale:
+        env["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = f"--force-device-scale-factor={args.scale}"
+    if args.hollow:
+        env["CC_HUD_HOLLOW"] = "1"
+    if args.selftest == "power":
+        env["CC_HUD_FAKE_POWER"] = "1"
+    if args.hidden:
+        env["CC_HUD_START_HIDDEN"] = "1"

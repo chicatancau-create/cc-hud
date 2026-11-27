@@ -1,0 +1,101 @@
+    con.execute("create table activity_daily_models (transcript_path text, date text, cost_usd real)")
+    con.execute("insert into activity_daily_models values (?,?,?)",
+                (str(projects / "sid-c.jsonl"), local_date(yday), 2.0))
+    con.execute("insert into activity_daily_models values (?,?,?)",
+                (str(projects / "sid-c.jsonl"), local_date(now), 3.0))
+    con.commit()
+    con.close()
+
+    s = cchaha.load(paths, "7d")
+    assert abs(s.days[local_date(yday)]["cost"] - 2.0) < 1e-9
+    assert abs(s.days[local_date(now)]["cost"] - 3.0) < 1e-9
+
+
+def test_cchaha_stale_session_not_registered(home, paths):
+    """范围外的会话不能进 sids，否则会误伤其他来源的去重窗口。"""
+    cfg = home / ".claude" / "cc-haha"
+    (cfg / "db").mkdir(parents=True)
+    projects = home / ".claude" / "projects"
+    old = local_noon() - 3 * 86400
+    jlines(projects / "sid-old.jsonl", [{
+        "timestamp": iso_utc(old),
+        "message": {"id": "old-1", "model": "claude-x",
+                    "content": [], "usage": {"input_tokens": 5, "output_tokens": 5}},
+    }])
+    db = cfg / "db" / "index-v1.sqlite"
+    con = sqlite3.connect(db)
+    con.execute("create table activity_daily_models (transcript_path text, date text, cost_usd real)")
+    con.commit()
+    con.close()
+
+    s = cchaha.load(paths, "1d")
+    assert s.totals()["reqs"] == 0
+    assert s.sids == set()
+
+
+def test_qoder_credits_only(paths):
+    t = local_noon()
+    jlines(paths.qoder_dir / "p" / "s1.jsonl", [
+        {"timestamp": iso_utc(t), "message": {"id": "m1", "usage": {"credits": 3.5}}},
+        {"timestamp": iso_utc(t), "message": {"id": "m1", "usage": {"credits": 3.5}}},
+    ])
+    s = qoder.load(paths, "1d")
+    q = [x for x in s if x.key == "qoder"][0]
+    assert q.totals()["reqs"] == 1
+    assert q.totals()["credits"] == 3.5
+    assert q.totals()["tokens"] == 0
+    assert q.supports_tokens is False
+
+
+def test_zcode_net_input_and_reasoning(paths):
+    db = paths.zcode_db
+    db.parent.mkdir(parents=True)
+    con = sqlite3.connect(db)
+    con.execute("""create table model_usage (started_at int, input_tokens int, output_tokens int,
+                   reasoning_tokens int, cache_read_input_tokens int,
+                   cache_creation_input_tokens int, model_id text, session_id text)""")
+    con.execute("insert into model_usage values (?,?,?,?,?,?,?,?)",
+                (int(local_noon() * 1000), 100, 10, 5, 60, 4, "glm-5", "z1"))
+    con.commit()
+    con.close()
+    s = zcode.load(paths, "1d")
+    t = s.totals()
+    assert t["fresh_in"] == 40
+    assert t["out"] == 15
+    assert t["tokens"] == 40 + 15 + 60 + 4
+
+
+def test_herdsman_iso_time(paths):
+    t = local_noon()
+    jlines(paths.herdsman_log, [
+        {"input_tokens": 20, "output_tokens": 8, "model": "qwen",
+         "request_id": "r1", "started_at": iso_utc(t)},
+        {"note": "no tokens"},
+    ])
+    s = herdsman.load(paths, "1d")
+    assert s.totals()["reqs"] == 1
+    assert s.totals()["tokens"] == 28
+    assert s.sessions == 0 and s.sids == set()   # request_id 不是会话
+
+
+def test_codex_skips_have_sids(paths):
+    t = local_noon()
+    name = "rollout-2026-11-07T10-00-00-11111111-2222-3333-4444-555555555555.jsonl"
+    jlines(paths.codex_dirs[0] / "2026" / "11" / "07" / name, [
+        {"timestamp": iso_utc(t),
+         "payload": {"total_token_usage": {"input_tokens": 100, "cached_input_tokens": 70,
+                                           "output_tokens": 20, "cache_write_input_tokens": 5}}},
+    ])
+    sid = "11111111-2222-3333-4444-555555555555"
+    skipped = codex.load(paths, "1d", exclude_sids={sid})
+    assert skipped.totals()["reqs"] == 0
+    s = codex.load(paths, "1d")
+    assert s.totals()["fresh_in"] == 30
+    assert s.totals()["cache_read"] == 70
+    assert s.totals()["tokens"] == 125
+
+
+def test_workbuddy_net_input_and_credit_rules(paths):
+    t = local_noon()
+    rec = {"timestamp": str(int(t * 1000)), "sessionId": "child-1",
+           "providerData": {"model": "wb-model", "rawUsage": {

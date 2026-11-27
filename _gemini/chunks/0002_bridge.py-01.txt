@@ -1,0 +1,114 @@
+"""桥接层：pywebview js_api 的实现。不启动服务、不监听端口。"""
+from __future__ import annotations
+
+import os
+import subprocess
+import threading
+import time
+from collections import OrderedDict
+from pathlib import Path
+from typing import Any, Protocol
+
+from . import __version__
+from .accounting import collect, merge, overall_status
+from .export import write_export
+from .paths import Paths
+from .ranges import RANGE_LABELS, RANGES, start_date
+from .settings import SettingsStore, validate
+
+SOURCE_META = [
+    ("ccswitch", "CC Switch", "proxy"),
+    ("cchaha", "cc-haha", "session"),
+    ("qoder", "Qoder", "session"),
+    ("qoder_cn", "Qoder CN", "session"),
+    ("zcode", "ZCode", "session"),
+    ("herdsman", "牧羊人", "local"),
+    ("codex", "Codex 未回填", "session"),
+    ("workbuddy", "WorkBuddy 国内", "session"),
+    ("workbuddy_ai", "WorkBuddy 国外", "session"),
+    ("dsh", "DSH", "session"),
+    ("dsh_v4", "DSH V4", "session"),
+]
+
+POWER_ACTIONS = ("sleep", "hibernate", "shutdown", "restart", "logoff", "lock")
+
+
+class PowerPort(Protocol):
+    def run(self, action: str, delay: int = 15) -> dict: ...
+    def cancel(self) -> dict: ...
+
+
+class SystemPower:
+    """真实电源动作；只有 confirmed=True 才会走到这里。"""
+
+    def run(self, action: str, delay: int = 15) -> dict:
+        if action == "lock":
+            cmd = ["rundll32.exe", "user32.dll,LockWorkStation"]
+            delay = 0
+        elif action == "sleep":
+            cmd = ["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"]
+            delay = 0
+        elif action == "hibernate":
+            cmd = ["shutdown", "/h"]
+            delay = 0
+        elif action == "shutdown":
+            cmd = ["shutdown", "/s", "/t", str(delay)]
+        elif action == "restart":
+            cmd = ["shutdown", "/r", "/t", str(delay)]
+        elif action == "logoff":
+            cmd = ["shutdown", "/l"]
+            delay = 0
+        else:
+            return {"ok": False, "reason": f"未知电源动作: {action}"}
+        subprocess.run(cmd, check=False)
+        return {"ok": True, "scheduled": delay > 0, "action": action, "delay": delay}
+
+    def cancel(self) -> dict:
+        subprocess.run(["shutdown", "/a"], check=False)
+        return {"ok": True, "action": "cancel"}
+
+
+class _Service:
+    def __init__(self, paths: Paths, ttl: float, capacity: int, now_fn):
+        self.paths = paths
+        self.ttl = ttl
+        self.capacity = capacity
+        self.now_fn = now_fn
+        self.revision = 0
+        self.last_seq = 0
+        self.hits = 0
+        self.misses = 0
+        self._cache: OrderedDict[str, tuple[float, int, dict]] = OrderedDict()
+        self._lock = threading.RLock()
+
+    def get(self, rng: str, seq: int = 0) -> dict:
+        if rng not in RANGES:
+            raise ValueError(f"unknown range: {rng}")
+        with self._lock:
+            if seq and seq < self.last_seq:
+                return {"stale": True, "seq": seq, "revision": self.revision, "range": rng}
+            self.last_seq = max(self.last_seq, int(seq or 0))
+            now = self.now_fn()
+            got = self._cache.get(rng)
+            if got and now - got[0] < self.ttl:
+                self.hits += 1
+                self._cache.move_to_end(rng)
+                payload = dict(got[2])
+                self.revision += 1      # 命中缓存也是一次新响应，revision 不得回退
+            else:
+                self.misses += 1
+                sources = collect(self.paths, rng, now)
+                agg = merge(sources, rng, now)
+                self.revision += 1
+                payload = {
+                    "schema": 1,
+                    "revision": self.revision,
+                    "range": rng,
+                    "generated_at": now,
+                    "status": overall_status(sources),
+                    "totals": agg["totals"],
+                    "kpis": agg["kpis"],
+                    "daily": agg["daily"],
+                    "hourly": agg["hourly"],
+                    "models": agg["models"],
+                    "timing": agg["timing"],

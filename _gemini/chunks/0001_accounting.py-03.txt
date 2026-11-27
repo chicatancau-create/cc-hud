@@ -1,0 +1,21 @@
+            for k in sd:
+                sd[k] += int(d[k])
+            hours += sum(int(x) for x in d["hours"])
+        add(f"{src.key}.totals_eq_days", all(t[k] == sd[k] for k in sd), src.key)
+        add(f"{src.key}.hours_eq_reqs", hours == t["reqs"],
+            f"{src.key}: Σhours={hours} reqs={t['reqs']}")
+        models_tok = sum(token_total(m) for d in src.days.values() for m in d["models"].values())
+        add(f"{src.key}.models_le_total", models_tok <= t["tokens"],
+            f"{src.key}: models={models_tok} <= total={t['tokens']}")
+    return checks
+
+
+def overall_status(sources: list[SourceSnapshot]) -> str:
+    st = {s.status for s in sources}
+    if STATUS_ERROR in st:
+        return STATUS_ERROR
+    if STATUS_OK in st:
+        return STATUS_OK
+    if STATUS_EMPTY in st:
+        return STATUS_EMPTY
+    return STATUS_UNSUPPORTED

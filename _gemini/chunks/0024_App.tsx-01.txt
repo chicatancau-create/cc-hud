@@ -1,0 +1,101 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { createNativeApi, createStubApi } from "./api/bridge";
+import { useSnapshot } from "./state/useSnapshot";
+import { ContextMenu } from "./components/ContextMenu";
+import type { Bootstrap, ExportResult, HudApi, MenuModel, RangeKey, Settings } from "./types";
+import { CardView } from "./views/CardView";
+import { InsightsView } from "./views/InsightsView";
+import { DiagnosticsView } from "./views/DiagnosticsView";
+import { SettingsView } from "./views/SettingsView";
+
+type NavLayout = Settings["layout"];
+
+export function App() {
+  const [ready, setReady] = useState<{ api: HudApi; mode: "native" | "stub" } | null>(null);
+  const [fatal, setFatal] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      // WebView2 注入 pywebview.api 可能晚于 React 首次渲染
+      const isFile = window.location.protocol === "file:";
+      const attempts = isFile ? 120 : 30;
+      for (let i = 0; i < attempts && alive; i++) {
+        const native = createNativeApi();
+        if (native) {
+          setReady({ api: native, mode: "native" });
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      if (!alive) return;
+      if (window.location.protocol === "file:") {
+        setFatal("宿主 API 未就绪（pywebview 注入失败），已停止以免用假数据冒充本机统计。");
+      } else {
+        setReady({ api: createStubApi(), mode: "stub" });
+      }
+    })();
+    return () => { alive = false; };
+  }, []);
+
+  if (fatal) {
+    return <div className="boot"><div className="fatal"><p>读取失败：{fatal}</p></div></div>;
+  }
+  if (!ready) return <div className="boot" data-testid="boot">连接宿主…</div>;
+  return <AppInner api={ready.api} mode={ready.mode} />;
+}
+
+function AppInner({ api, mode }: { api: HudApi; mode: "native" | "stub" }) {
+  const [boot, setBoot] = useState<Bootstrap | null>(null);
+  const [bootError, setBootError] = useState("");
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [range, setRange] = useState<RangeKey>("1d");
+  const [exportResult, setExportResult] = useState<ExportResult | null>(null);
+  const [notice, setNotice] = useState("");
+  const settingsSeq = useRef(0);
+  const settingsChain = useRef<Promise<unknown>>(Promise.resolve());
+  /** 服务端已确认的范围：只有「最新一次」请求失败时才允许回滚到它 */
+  const committedRange = useRef<RangeKey>(range);
+  const { snap, loading, refreshing, error, reload } = useSnapshot(api, range, boot !== null);
+
+  useEffect(() => {
+    let alive = true;
+    api.bootstrap().then((b) => {
+      if (!alive) return;
+      setBoot(b);
+      setSettings(b.settings);
+      setRange(b.settings.range);
+      committedRange.current = b.settings.range;
+    }).catch((e: unknown) => {
+      if (!alive) return;
+      setBootError(String(e));
+    });
+    return () => { alive = false; };
+  }, [api]);
+
+  useEffect(() => {
+    if (!settings) return;
+    document.body.dataset.theme = settings.theme;
+    document.body.classList.toggle("mode-card", settings.layout === "card");
+    document.body.dataset.layout = settings.layout;
+  }, [settings]);
+
+  const change = useCallback(async (patch: Partial<Settings>) => {
+    const id = ++settingsSeq.current;
+    if (patch.range) setRange(patch.range);   // 先切范围，再等设置回包
+    const run = settingsChain.current.then(() => api.set_settings(patch));
+    settingsChain.current = run.catch(() => undefined);   // 串行写，服务端顺序=点击顺序
+    try {
+      const next = await run;
+      // 串行写在前面已排空，这条回包就是「此刻的服务端真值」，与是否过时无关
+      committedRange.current = next.range;
+      if (id === settingsSeq.current) {
+        setSettings(next);                    // 只认最后一次设置回包
+        if (patch.range) setRange(next.range);  // 用服务端权威值重同步乐观范围
+      }
+      return next;
+    } catch (e) {
+      // 只有最新一次请求可以改 range：被取代的请求失败时既不回滚、也不打扰用户，
+      // 否则两次快速切范围时先发的那次会把 range 滚回旧值且再没人把它同步回来。
+      if (id === settingsSeq.current) {
+        if (patch.range) setRange(committedRange.current);   // 回滚到服务端最后确认的范围

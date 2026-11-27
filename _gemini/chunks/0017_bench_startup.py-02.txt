@@ -1,0 +1,105 @@
+    out = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                          "-File", str(ps1), str(pid)],
+                         capture_output=True, text=True).stdout.strip()
+    names = [n for n in out.split(",") if n]
+    counts: dict[str, int] = {}
+    for n in names:
+        counts[n.lower()] = counts.get(n.lower(), 0) + 1
+    return {"count": len(names), "by_name": counts}
+
+
+def run_once(root: Path, profile: Path, settle: float, pyw: Path = PY_W) -> dict:
+    env = dict(os.environ, CC_HUD_PROFILE=str(profile), CC_HUD_LAYOUT="card")
+    env.pop("CC_HUD_SIZE", None)
+    runtime = root / "artifacts" / "runtime.json"
+    try:
+        runtime.unlink()
+    except OSError:
+        pass
+    _kill_running()          # 上一轮没退干净会撞单实例闸门，测出 None
+    t0 = time.perf_counter()
+    proc = subprocess.Popen([str(pyw), str(root / "cc-hud.pyw")], cwd=str(root), env=env)
+    data: dict = {}
+    ready_ms = None
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        try:
+            data = json.loads(runtime.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if data.get("ready"):
+            ready_ms = round((time.perf_counter() - t0) * 1000, 1)
+            break
+        if proc.poll() is not None:
+            break
+        time.sleep(0.05)
+    mem = None
+    tree = None
+    if ready_ms is not None and settle > 0:
+        time.sleep(settle)
+        mem = _mem_mb(proc.pid)
+        tree = _tree(proc.pid)
+    hwnd = int(data.get("hwnd") or 0)
+    if hwnd:
+        subprocess.run(["powershell", "-NoProfile", "-Command",
+                        "Add-Type -Namespace W -Name U -MemberDefinition "
+                        "'[DllImport(\"user32.dll\")] public static extern bool PostMessageW("
+                        "IntPtr h,uint m,IntPtr w,IntPtr l);'; "
+                        f"[W.U]::PostMessageW([IntPtr]{hwnd},0x0010,[IntPtr]::Zero,[IntPtr]::Zero)"],
+                       capture_output=True)
+    for _ in range(20):
+        if proc.poll() is not None:
+            break
+        time.sleep(0.2)
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    return {
+        "ready_ms": ready_ms,
+        "bench": data.get("bench") or {},
+        "rss_mb": mem,
+        "tree": tree,
+        "tray_added": bool(data.get("tray_added")),
+        "dot_created": data.get("dot_created"),
+    }
+
+
+def summarize(rows: list[dict]) -> dict:
+    vals = [r["ready_ms"] for r in rows if r.get("ready_ms")]
+    mems = [r["rss_mb"] for r in rows if r.get("rss_mb")]
+    return {
+        "rounds": len(rows),
+        "ready_ms_median": round(statistics.median(vals), 1) if vals else None,
+        "ready_ms_min": min(vals) if vals else None,
+        "ready_ms_max": max(vals) if vals else None,
+        "rss_mb_median": round(statistics.median(mems), 1) if mems else None,
+        "rows": rows,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--rounds", type=int, default=3)
+    ap.add_argument("--settle", type=float, default=2.0)
+    ap.add_argument("--root", default=str(ROOT),
+                    help="被测项目根（可用 git worktree 指向改造前版本做前后对比）")
+    ap.add_argument("--label", default="current")
+    ap.add_argument("--out", default="")
+    ap.add_argument("--python", default=str(PY_W), help="用哪个 pythonw 跑被测版本")
+    args = ap.parse_args()
+    root = Path(args.root).resolve()
+    pyw = Path(args.python)
+
+    profile = Path(tempfile.mkdtemp(prefix="cchud-bench-profile-"))
+    cold: list[dict] = []
+    warm: list[dict] = []
+    try:
+        for _ in range(args.rounds):
+            _kill_running()
+            shutil.rmtree(profile, ignore_errors=True)
+            cold.append(run_once(root, profile, args.settle, pyw))
+        _kill_running()
+        for _ in range(args.rounds):        # 热启动复用同一个 profile（WebView2 缓存）

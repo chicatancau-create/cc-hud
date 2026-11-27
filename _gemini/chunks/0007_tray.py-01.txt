@@ -1,0 +1,97 @@
+# -*- coding: utf-8 -*-
+"""Win32 托盘与进程探测（原 cchud.sysw 迁入，纯 ctypes + Pillow）。"""
+import ctypes
+import time
+from ctypes import wintypes as wt
+
+
+__all__ = [
+    '_PE', 'ccswitch_pid', 'already_running', 'WM_TRAY', 'TRAY_EVT', '_hicon', '_NID', '_WCX',
+    'Tray',
+]
+
+
+class _PE(ctypes.Structure):
+    _fields_ = [('dwSize', wt.DWORD), ('cntUsage', wt.DWORD), ('th32ProcessID', wt.DWORD),
+                ('th32DefaultHeapID', ctypes.c_size_t), ('th32ModuleID', wt.DWORD),
+                ('cntThreads', wt.DWORD), ('th32ParentProcessID', wt.DWORD),
+                ('pcPriClassBase', wt.LONG), ('dwFlags', wt.DWORD),
+                ('szExeFile', wt.WCHAR * 260)]
+
+
+def ccswitch_pid():
+    """CC Switch 主进程 PID, 不在则 None。一次快照拿全部进程名, 不派生 tasklist。"""
+    k32 = ctypes.windll.kernel32
+    k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p     # 不写这句: 返回值按 c_int 截断,
+    snap = k32.CreateToolhelp32Snapshot(0x2, 0)       # TH32CS_SNAPPROCESS   大句柄会变负数
+    if not snap or ctypes.c_ssize_t(snap).value == -1:
+        return None
+    pe = _PE()
+    pe.dwSize = ctypes.sizeof(_PE)
+    pid = None
+    try:
+        ok = k32.Process32FirstW(snap, ctypes.byref(pe))
+        while ok:
+            if pe.szExeFile.lower().startswith('cc-switch'):
+                pid = int(pe.th32ProcessID)
+                break
+            ok = k32.Process32NextW(snap, ctypes.byref(pe))
+    finally:
+        k32.CloseHandle(snap)
+    return pid
+
+
+def already_running():
+    """命名互斥体做单实例闸门: 开机自启 + 手动再双击只会留一个卡片。"""
+    ctypes.windll.kernel32.CreateMutexW(None, False, 'Local\\cc-hud-single')
+    return ctypes.windll.kernel32.GetLastError() == 183   # ERROR_ALREADY_EXISTS
+
+
+# ── 系统托盘: 隐藏之后唯一的找回入口(纯 ctypes, 不引第三方) ────────────────
+WM_TRAY = 0x800 + 1
+
+# 一次物理单击会被 Shell 发成好几条消息（DOWN / UP / NIN_SELECT / DBLCLK），
+# 不去抖就会「点一下、切换两次」。同一类事件在 DEBOUNCE 秒内只认第一条。
+LEFT_CODES = (0x202, 0x203, 0x400, 0x401)   # LBUTTONDOWN/DBLCLK/NIN_SELECT/NIN_KEYSELECT
+RIGHT_CODES = (0x204, 0x7B)                 # RBUTTONUP/WM_CONTEXTMENU
+TRAY_EVT = {**{c: 'toggle' for c in LEFT_CODES}, **{c: 'menu' for c in RIGHT_CODES}}
+DEBOUNCE = 0.30
+
+
+def _hicon(size, on):
+    """画一枚托盘图标并转成 HICON: 32bpp 颜色位图 + 全零 AND 掩码, alpha 交给外壳读。"""
+    from PIL import Image, ImageDraw
+    s = size * 4
+    im = Image.new('RGBA', (s, s), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    acc = (52, 211, 153, 255) if on else (96, 108, 124, 255)
+    lw = max(1, int(s * 0.055))
+    d.rounded_rectangle([s * .05, s * .05, s * .95, s * .95], radius=s * .24,
+                        fill=(16, 19, 29, 255), outline=acc, width=lw)
+    r = s * .24
+    d.ellipse([s / 2 - r, s / 2 - r, s / 2 + r, s / 2 + r], outline=acc,
+              width=max(1, int(s * .085)))
+    k = s * .06
+    d.ellipse([s / 2 - k, s / 2 - k, s / 2 + k, s / 2 + k], fill=acc)
+    im = im.transpose(Image.FLIP_TOP_BOTTOM).resize((size, size), Image.LANCZOS)
+    g, u = ctypes.windll.gdi32, ctypes.windll.user32
+    gdi32_CreateBitmap = g.CreateBitmap
+    gdi32_CreateBitmap.restype = ctypes.c_void_p
+    gdi32_CreateBitmap.argtypes = [ctypes.c_int] * 4 + [ctypes.c_void_p]
+    col = gdi32_CreateBitmap(size, size, 1, 32, im.tobytes('raw', 'BGRA'))
+    mask = gdi32_CreateBitmap(size, size, 1, 1, b'\x00' * (((size + 31) // 32) * 4 * size))
+
+    class _II(ctypes.Structure):
+        # winuser.h 的 ICONINFO 真布局是 fIcon / xHotspot / yHotspot / hbmMask / hbmColor。
+        # 以前写成 fIcon/fMask/两个句柄(24 字节): CreateIconIndirect 把 mask 指针当成
+        # yHotspot、把 color 当成 hbmMask、hbmColor 读到未初始化内存 -> 直接返回 NULL,
+        # 于是 nid.hIcon=0。NIM_ADD 对 hIcon=0 照样返回"成功", 外壳就摆了一个透明空槽。
+        _fields_ = [('fIcon', wt.BOOL), ('xHotspot', wt.DWORD), ('yHotspot', wt.DWORD),
+                    ('hbmMask', ctypes.c_void_p), ('hbmColor', ctypes.c_void_p)]
+
+    u.CreateIconIndirect.restype = ctypes.c_void_p
+    u.CreateIconIndirect.argtypes = [ctypes.c_void_p]
+    g.DeleteObject.argtypes = [ctypes.c_void_p]
+    h = u.CreateIconIndirect(ctypes.byref(_II(1, 0, 0, mask, col)))
+    g.DeleteObject(col)
+    g.DeleteObject(mask)

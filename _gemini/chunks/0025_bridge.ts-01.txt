@@ -1,0 +1,106 @@
+import type { Bootstrap, ExportResult, HudApi, MenuModel, RangeKey, Settings, Snapshot } from "../types";
+import { stubBootstrap, stubSnapshot } from "./stub";
+
+declare global {
+  interface Window {
+    pywebview?: { api: Partial<HudApi> };
+  }
+}
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** 场景桩：?scenario=empty|zero|unsupported|error 用于 Playwright 断言四种状态。 */
+function applyScenario(snap: Snapshot): Snapshot {
+  const scenario = new URLSearchParams(window.location.search).get("scenario");
+  if (!scenario) return snap;
+  const ZERO_T = { reqs: 0, credits: 0, fresh_in: 0, out: 0, cache_read: 0, cache_write: 0, cost: 0, tokens: 0 };
+  const zeroSrc = (s: Snapshot["sources"][number]): Snapshot["sources"][number] => ({
+    ...s, totals: { ...ZERO_T }, sessions: 0, last_seen: null
+  });
+  if (scenario === "empty") {
+    return {
+      ...snap, status: "empty", daily: [], models: [], apps: [],
+      totals: { ...ZERO_T },
+      kpis: { sessions: 0, active_days: 0, cost: null, tokens: 0, cache_hit: null, credits: null },
+      sources: snap.sources.map((s) => zeroSrc({ ...s, status: "empty" as const, reason: "本期无记录" }))
+    };
+  }
+  if (scenario === "zero") {
+    return {
+      ...snap, status: "ok", daily: [], models: [], apps: [],
+      totals: { ...ZERO_T },
+      kpis: { sessions: 0, active_days: 0, cost: 0, tokens: 0, cache_hit: null, credits: 0 },
+      sources: snap.sources.map((s) => zeroSrc({ ...s, status: "ok" as const, reason: null }))
+    };
+  }
+  if (scenario === "unsupported") {
+    return {
+      ...snap, status: "unsupported", daily: [], models: [], apps: [], totals: { ...ZERO_T },
+      kpis: { sessions: 0, active_days: 0, cost: null, tokens: 0, cache_hit: null, credits: null },
+      sources: snap.sources.map((s) => zeroSrc({
+        ...s, status: "unsupported" as const, reason: "来源不支持该维度"
+      }))
+    };
+  }
+  return {
+    ...snap, status: "error", daily: [], models: [], apps: [], totals: { ...ZERO_T },
+    kpis: { sessions: 0, active_days: 0, cost: null, tokens: 0, cache_hit: null, credits: null },
+    sources: snap.sources.map((s) => zeroSrc({
+      ...s, status: "error" as const, reason: "读取失败：权限被拒绝"
+    }))
+  };
+}
+
+export function createStubApi(): HudApi {
+  let settings: Settings = stubBootstrap().settings;
+  let revision = 7;
+  const api: HudApi = {
+    async bootstrap(): Promise<Bootstrap> {
+      await delay(5);
+      return stubBootstrap();
+    },
+    async snapshot(range: RangeKey, seq: number): Promise<Snapshot> {
+      await delay(30);
+      const snap = applyScenario(stubSnapshot(range, seq));
+      return { ...snap, revision: revision++, seq };
+    },
+    async detail(key: string, range: RangeKey) {
+      const snap = applyScenario(stubSnapshot(range, 0));
+      return { source: snap.sources.find((s) => s.key === key) ?? null, range };
+    },
+    async get_settings() {
+      return settings;
+    },
+    async set_settings(patch: Partial<Settings>) {
+      settings = { ...settings, ...patch };
+      return settings;
+    },
+    async export_json(): Promise<ExportResult> {
+      return { path: "cc-hud-usage-7d.json", bytes: 4096, revision };
+    },
+    async power(action: string, confirmed: boolean) {
+      return confirmed ? { ok: true, action } : { ok: false, reason: "需要二次确认" };
+    },
+    async cancel_power() {
+      return { ok: true };
+    },
+    async window() {
+      return { ok: true };
+    },
+    async menu_model(): Promise<MenuModel> {
+      return { ok: true, items: stubMenu(settings), settings };
+    },
+    async menu_command(id: string) {
+      const patch = stubMenuPatch(id);
+      if (patch) {
+        settings = { ...settings, ...patch };
+        return { ok: true, settings };
+      }
+      if (id === "action.refresh") return { ok: true, reason: "刷新（浏览器桩）" };
+      return { ok: false, reason: `桩不执行 ${id}` };
+    }
+  };
+  return api;
+}
+
+function stubMenu(settings: Settings) {

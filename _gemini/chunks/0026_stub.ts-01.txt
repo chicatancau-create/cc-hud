@@ -1,0 +1,67 @@
+import type {
+  AppRow, Bootstrap, DayRow, ModelRow, RangeKey, Snapshot, SourcePayload, Status
+} from "../types";
+
+const RANGE_DAYS: Record<RangeKey, number> = { "1d": 1, "7d": 7, "30d": 30, all: 90 };
+const BASE = new Date("2026-11-07T12:00:00");
+
+function dayKey(offset: number): string {
+  const d = new Date(BASE);
+  d.setDate(d.getDate() - offset);
+  return d.toISOString().slice(0, 10);
+}
+
+function totalsOf(days: DayRow[]) {
+  const t = { reqs: 0, credits: 0, fresh_in: 0, out: 0, cache_read: 0, cache_write: 0, cost: 0, tokens: 0 };
+  for (const d of days) {
+    t.reqs += d.reqs; t.fresh_in += d.fresh_in; t.out += d.out;
+    t.cache_read += d.cache_read; t.cache_write += d.cache_write; t.cost += d.cost;
+  }
+  t.tokens = t.fresh_in + t.out + t.cache_read + t.cache_write;
+  return t;
+}
+
+const DEFS: { key: string; name: string; kind: string; status: Status; reason: string | null; note: string; cost: boolean; credits: boolean; tokens: boolean }[] = [
+  { key: "ccswitch", name: "CC Switch", kind: "proxy", status: "ok", reason: null, note: "代理日志 · 基准路", cost: true, credits: false, tokens: true },
+  { key: "cchaha", name: "cc-haha", kind: "session", status: "ok", reason: null, note: "索引成本按本地日份额分摊", cost: true, credits: false, tokens: true },
+  { key: "qoder", name: "Qoder", kind: "session", status: "ok", reason: null, note: "只有请求数与 credits", cost: false, credits: true, tokens: false },
+  { key: "qoder_cn", name: "Qoder CN", kind: "session", status: "empty", reason: "本期无记录", note: "只有请求数与 credits", cost: false, credits: true, tokens: false },
+  { key: "zcode", name: "ZCode", kind: "session", status: "ok", reason: null, note: "input 含缓存读(已减) · 本机不记钱", cost: false, credits: false, tokens: true },
+  { key: "herdsman", name: "牧羊人", kind: "local", status: "ok", reason: null, note: "本地推理服务 · 无缓存分项", cost: false, credits: false, tokens: true },
+  { key: "codex", name: "Codex 未回填", kind: "session", status: "ok", reason: null, note: "只补 CC Switch 零行的会话", cost: false, credits: false, tokens: true },
+  { key: "workbuddy", name: "WorkBuddy 国内", kind: "session", status: "ok", reason: null, note: "prompt 含缓存读写（已拆出）", cost: false, credits: true, tokens: true },
+  { key: "workbuddy_ai", name: "WorkBuddy 国外", kind: "session", status: "unsupported", reason: "积分两本账矛盾，不并", note: "本机不记钱", cost: false, credits: false, tokens: true },
+  { key: "dsh", name: "DSH", kind: "session", status: "ok", reason: null, note: "会话累计 · 小时归属近似", cost: false, credits: false, tokens: true },
+  { key: "dsh_v4", name: "DSH V4", kind: "session", status: "error", reason: "一个会话文件解压失败", note: "zstd JSONL", cost: false, credits: false, tokens: true }
+];
+
+function source(def: (typeof DEFS)[number], days: DayRow[]): SourcePayload {
+  const share = def.status === "ok" ? 0.12 : 0;
+  const own: DayRow[] = days.map((d) => ({
+    ...d,
+    reqs: Math.round(d.reqs * share),
+    tokens: Math.round(d.tokens * share),
+    fresh_in: Math.round(d.fresh_in * share),
+    out: Math.round(d.out * share),
+    cache_read: Math.round(d.cache_read * share),
+    cache_write: Math.round(d.cache_write * share),
+    cost: d.cost * share
+  }));
+  const t = totalsOf(own);
+  return {
+    key: def.key, name: def.name, kind: def.kind, status: def.status, reason: def.reason,
+    note: def.note, supports_cost: def.cost, supports_credits: def.credits,
+    supports_tokens: def.tokens,
+    totals: { ...t, reqs: def.tokens ? t.reqs : Math.round(t.reqs / 3), credits: def.credits ? 12.5 : 0 },
+    sessions: def.status === "ok" ? 3 : 0,
+    last_seen: def.status === "ok" ? BASE.getTime() / 1000 : null,
+    warnings: def.status === "error" ? ["session.v4.jsonl.zstd: 解压失败"] : [],
+    suppressed: null
+  };
+}
+
+export function stubSnapshot(range: RangeKey, seq = 0): Snapshot {
+  const n = RANGE_DAYS[range];
+  const days: DayRow[] = Array.from({ length: n }, (_, i) => {
+    const wave = 0.55 + 0.45 * Math.sin((i / Math.max(1, n)) * Math.PI * 2);
+    const tokens = Math.round((range === "1d" ? 1.85e6 : 1.1e6) * wave);

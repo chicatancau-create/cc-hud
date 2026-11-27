@@ -1,0 +1,31 @@
+    runs = [run_chain(dpi, label, required) for label, dpi, required in specs if label in want]
+    mons = monitors()
+    blocked = []
+    for r in runs:
+        if r["required"]:
+            continue
+        if not r["ok"]:
+            blocked.append(f"{r['label']}: {r.get('error')}")
+        r["simulated"] = ("强制 DPI 只改宿主换算；WinForms/WebView2 仍按系统 DPI 125% 原生缩放，"
+                          "本机无法得到可信的 100%/150% 结果")
+    core = [r for r in runs if r["required"]]
+    doc = {
+        "ok": bool(core) and all(r["ok"] for r in core),
+        "blocked": blocked,
+        "display_count": len(mons),
+        "multi_monitor": "blocked: only 1 display" if len(mons) < 2 else "ok",
+        "dpi_note": "system 档是真实系统 DPI（125%）；dpi96/dpi144 为强制换算探测，失败只记 blocked，不计入通过",
+        "runs": runs,
+        "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(json.dumps({"ok": doc["ok"], "display_count": doc["display_count"],
+                      "multi_monitor": doc["multi_monitor"],
+                      "runs": [{"dpi": r["dpi"], "ok": r["ok"],
+                                "error": r.get("error")} for r in runs]}, ensure_ascii=False))
+    return 0 if doc["ok"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

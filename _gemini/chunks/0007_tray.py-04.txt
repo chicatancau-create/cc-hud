@@ -1,0 +1,35 @@
+                u.AppendMenuW(hmenu, flags, mid, title)
+            return hmenu
+
+        menu = build(items)
+        pt = wt.POINT()
+        u.GetCursorPos(ctypes.byref(pt))
+        try:
+            u.SetForegroundWindow(self.hwnd)
+            picked = u.TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                                      pt.x, pt.y, 0, self.hwnd, None)
+        finally:
+            u.DestroyMenu(menu)
+            u.PostMessageW(self.hwnd, 0, 0, 0)   # 让菜单真正收起
+        return ids.get(int(picked or 0))
+
+    def set(self, on, tip):
+        """切换图标明暗 + 更新悬停提示(显示中/已隐藏)。"""
+        if on not in self._icons:
+            self._icons[on] = _hicon(16, on)
+        self.nid.hIcon = self._icons[on]
+        if tip != self._tip:
+            self.nid.szTip = tip[:63]
+            self._tip = tip
+        if self.added:
+            ctypes.windll.shell32.Shell_NotifyIconW(1, ctypes.byref(self.nid))   # NIM_MODIFY
+
+    def quit(self):
+        if getattr(self, 'added', False):
+            ctypes.windll.shell32.Shell_NotifyIconW(2, ctypes.byref(self.nid))   # NIM_DELETE
+            self.added = False
+        if getattr(self, 'hwnd', None):
+            ctypes.windll.user32.DestroyWindow(self.hwnd)
+            self.hwnd = None
+        for k in list(getattr(self, '_icons', {})):        # HICON 是我们 CreateIconIndirect 造的
+            ctypes.windll.user32.DestroyIcon(self._icons.pop(k))

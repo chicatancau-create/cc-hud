@@ -1,0 +1,62 @@
+            out["cost"] += float(d["cost"])
+        out["tokens"] = sum(out[k] for k in TOKEN_KEYS)
+        return out
+
+    def to_dict(self) -> dict[str, Any]:
+        days = {}
+        for date in sorted(self.days):
+            d = self.days[date]
+            days[date] = {
+                "reqs": int(d["reqs"]),
+                "credits": float(d["credits"]),
+                "fresh_in": int(d["fresh_in"]),
+                "out": int(d["out"]),
+                "cache_read": int(d["cache_read"]),
+                "cache_write": int(d["cache_write"]),
+                "cost": float(d["cost"]),
+                "hours": [int(x) for x in d["hours"]],
+                "models": {
+                    name: {**{k: (float(v) if k == "cost" else int(v)) for k, v in m.items()}}
+                    for name, m in sorted(d["models"].items())
+                },
+            }
+        return {
+            "key": self.key,
+            "name": self.name,
+            "kind": self.kind,
+            "status": self.status,
+            "reason": self.reason,
+            "note": self.note,
+            "supports_cost": self.supports_cost,
+            "supports_credits": self.supports_credits,
+            "supports_tokens": self.supports_tokens,
+            "totals": self.totals(),
+            "days": days,
+            "sessions": int(self.sessions or 0),
+            "last_seen": self.last_seen,
+            "warnings": list(self.warnings),
+            "suppressed": self.suppressed,
+            "session_rows": self.session_rows[:500],
+            "timing": self.timing,
+            "tools": [
+                {"name": k, "n": v["n"], "sessions": len(v["sessions"]), "last_seen": v["last"]}
+                for k, v in sorted(self.tool_counts.items(), key=lambda kv: -kv[1]["n"])[:50]
+            ],
+        }
+
+
+def add_session(snap: "SourceSnapshot", sid: str, *, reqs: int = 0, tokens: int = 0,
+                cost: float = 0.0, credits: float = 0.0, model: str | None = None,
+                last_seen: float | None = None) -> None:
+    """会话级汇总（真实数据；九路各自能给的维度不同，缺的留空而不是编）。"""
+    if not sid or (reqs == 0 and tokens == 0 and credits == 0):
+        return
+    snap.session_rows.append({
+        "id": str(sid), "source": snap.key, "reqs": int(reqs), "tokens": int(tokens),
+        "cost": float(cost), "credits": float(credits),
+        "model": model, "last_seen": last_seen,
+    })
+
+
+def token_total(d: dict[str, Any]) -> int:
+    return sum(int(d.get(k) or 0) for k in TOKEN_KEYS)

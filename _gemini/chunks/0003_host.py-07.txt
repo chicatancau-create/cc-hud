@@ -1,0 +1,106 @@
+        return menu_mod.build(self.settings, self.hidden, self._tray_ok())
+
+    def run_menu(self, cmd_id: str) -> dict:
+        """唯一分发点：托盘原生菜单和前端右键菜单都走这里。
+
+        业务不在这里重写，全部转调已有的设置/窗口/电源路径。
+        """
+        if not cmd_id or not menu_mod.is_known(cmd_id):
+            return {"ok": False, "reason": f"未知菜单命令: {cmd_id}"}
+        parts = cmd_id.split(".")
+        head = parts[0]
+        if head == "panel":
+            self.hide() if not self.hidden else self.show()
+            return {"ok": True, "hidden": self.hidden}
+        if head == "view":
+            return self._menu_set({"layout": parts[1]})
+        if head == "range":
+            return self._menu_set({"range": parts[1]})
+        if head == "setting":
+            key = parts[1]
+            if key in menu_mod.TOGGLES:
+                # check 项：点击即取反当前值，避免前端/托盘各自算一遍状态
+                return self._menu_set({key: not bool(self.settings.get(key))})
+            patch = menu_mod.patch_for(cmd_id)
+            if patch is None:
+                return {"ok": False, "reason": f"未知设置项: {cmd_id}"}
+            return self._menu_set(patch)
+        if head == "action":
+            if parts[1] == "open_settings":
+                return self._menu_set({"layout": "settings"})
+            if parts[1] == "refresh":
+                return {"ok": True, "action": "refresh"}
+            if parts[1] == "export":
+                rng = self.settings.get("range", "1d")
+                try:
+                    out = self.bridge.export_json(rng)
+                except Exception as exc:
+                    return {"ok": False, "reason": repr(exc)}
+                return {"ok": bool(out), "action": "export", "range": rng, "result": out}
+            return {"ok": False, "reason": f"未知动作: {cmd_id}"}
+        if head == "power":
+            # 菜单只负责「请求」；真正的执行仍要经 bridge.power(confirmed=True) 的二次确认路径
+            return {"ok": True, "action": "power", "power": parts[1], "needs_confirm": True}
+        if head == "app" and parts[1] == "quit":
+            self.status["quit_reason"] = "menu"
+            self._write_status()
+            self._schedule_on_gui(self._quit_quiet)
+            return {"ok": True, "action": "quit"}
+        return {"ok": False, "reason": f"未处理: {cmd_id}"}
+
+    def _menu_set(self, patch: dict) -> dict:
+        """设置类菜单命令：走 bridge 的事务路径（原生失败不落盘）。"""
+        try:
+            out = self.bridge.set_settings(patch)
+        except Exception as exc:
+            return {"ok": False, "reason": str(exc)}
+        self.settings = dict(out)
+        return {"ok": True, "settings": self.settings}
+
+    def _start_tray_now(self) -> None:
+        """建托盘并等它落账（最多 3s）。
+
+        Tray 的 WndProc 必须在 GUI 线程建窗；这里用 Invoke（同步）把创建派发过去，
+        保证 status["tray_added"] 在 ready=true 之前就有确定值。
+        """
+        if self.tray is not None:
+            return
+        native = getattr(self.window, "native", None)
+        in_gui = False
+        try:
+            in_gui = native is not None and not bool(native.InvokeRequired)
+        except Exception:
+            in_gui = native is None
+        if in_gui:
+            self._start_tray()
+            return
+        done = threading.Event()
+
+        def run() -> None:
+            try:
+                self._start_tray()
+            finally:
+                done.set()
+
+        self._schedule_on_gui(run)
+        if not done.wait(3.0):
+            self.status["tray_added"] = False
+            self.status["tray_error"] = "托盘建立超时（GUI 线程 3s 未完成）"
+
+    def _start_tray(self) -> None:
+        if self.tray is not None:
+            return
+        host = self
+        try:
+            import ctypes as _ct
+            from . import tray as _sysw
+
+            class _SyncTray(_sysw.Tray):
+                """托盘事件在 WndProc（GUI 线程）里同步处理。
+
+                实测：pywebview/WinForms 循环起来约 1~2 秒后，Python 后台线程会被饿死，
+                用 queue+轮询线程的旧做法会静默失效。"""
+
+                def _wnd(self, h, msg, wp, lp):
+                    try:
+                        if msg == _sysw.WM_TRAY:

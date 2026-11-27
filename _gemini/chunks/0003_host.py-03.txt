@@ -1,0 +1,97 @@
+            if not self.ops.set_round_region(w, h, radius):
+                raise RuntimeError("圆角区域镂空失败")
+            if not self.ops.set_alpha(alpha):
+                raise RuntimeError("整窗透明度设置失败")
+            self.status["hollow_mode"] = "region"
+        else:
+            self.ops.clear_region()
+            self.status["hollow_mode"] = "alpha"
+            if not self.ops.set_alpha(alpha):
+                raise RuntimeError("整窗透明度设置失败")
+
+    def _layout_px(self, settings: dict) -> tuple[int, int]:
+        logical = LAYOUT_SIZES.get(settings.get("layout"), LAYOUT_SIZES["card"])
+        force = os.environ.get("CC_HUD_FORCE_DPI")
+        try:
+            dpi = float(force) if force else float(dpi_for_window(self.ops.hwnd) or 0)
+        except Exception:
+            dpi = 0.0
+        scale = dpi / 96.0 if dpi > 0 else system_scale()
+        w, h = int(logical[0] * scale), int(logical[1] * scale)
+        mons = monitors()
+        if mons:
+            l, t, r, b = mons[0]["work"]
+            w = min(w, max(200, r - l - 16))
+            h = min(h, max(150, b - t - 16))
+        return w, h
+
+    def _pin_native_size(self, w: int, h: int) -> None:
+        """把 WinForms 的 Min/Max 钉到当前布局尺寸。
+
+        pywebview 建窗后框架会在 WebView2 首次渲染完成时再走一遍布局，
+        把窗口改成另一个尺寸；Min=Max 后这次改写会被夹回目标值。"""
+        native = getattr(self.window, "native", None)
+        if native is None:
+            return
+        from System.Drawing import Size
+        from System.Windows.Forms import FormStartPosition
+        native.StartPosition = FormStartPosition.Manual   # 否则框架重排时会按 CenterScreen 再居中
+        native.MinimumSize = Size(1, 1)
+        native.MaximumSize = Size(int(w), int(h))
+        native.MinimumSize = Size(int(w), int(h))
+
+    def _apply_layout_size(self, settings: dict) -> None:
+        if not self.ops:
+            return
+        if os.environ.get("CC_HUD_SIZE"):
+            return
+        w, h = self._layout_px(settings)
+        self._run_on_gui(self._pin_native_size, w, h)
+        anchor = "top-right" if settings.get("layout") == "card" else "center"
+        res = self.ops.place(w, h, 0, anchor, 0 if anchor == "center" else 16, keep_size=False)
+        # 只有 SetWindowPos 真的失败才算致命（此时窗口根本没被搬动/改尺寸）。
+        if res.get("ok") is False:
+            raise RuntimeError(
+                f"窗口尺寸未生效：SetWindowPos 失败（期望 {w}x{h}，"
+                f"实际 {res.get('w')}x{res.get('h')}, err={res.get('err')}）")
+        aw, ah = int(res.get("w") or w), int(res.get("h") or h)
+        if (aw, ah) != (w, h):
+            # 请求成功但实际尺寸漂移：先记账，纠回交给下面的矩形守卫（设计本意，不 raise）。
+            self.status["size_mismatch"] = {"requested": [int(w), int(h)],
+                                            "actual": [aw, ah], "at": time.time()}
+        else:
+            self.status.pop("size_mismatch", None)
+        # 守卫目标是「请求值」而不是实测值：漂移要靠它拉回目标尺寸。
+        self._run_on_gui(self._start_rect_guard,
+                         (int(res["x"]), int(res["y"]), int(w), int(h)))
+
+    def _start_rect_guard(self, target: tuple[int, int, int, int], ticks: int = 40) -> None:
+        """布局切换后短暂守住目标矩形。
+
+        WinForms/WebView2 在首次渲染完成后会再走一遍重排，偶发把窗口改成另一个尺寸
+        并按旧尺寸重新居中；这里在 GUI 线程上把漂移立刻纠回。"""
+        if self.ops is None or getattr(self.window, "native", None) is None:
+            return
+        try:
+            prev = getattr(self, "_rect_guard", None)
+            if prev is not None:
+                prev.Stop()
+                prev.Dispose()
+        except Exception:
+            pass
+        try:
+            from System.Windows.Forms import Timer
+        except Exception:
+            return
+
+        tx, ty, tw, th = target
+        state = {"left": ticks}
+
+        def tick(sender, args):
+            try:
+                cur = self.ops.rect()
+                if cur != (tx, ty, tx + tw, ty + th):
+                    self.ops.move(tx, ty, tw, th)
+                    self.status["rect_guard_fixes"] = int(self.status.get("rect_guard_fixes", 0)) + 1
+                state["left"] -= 1
+                if state["left"] <= 0:

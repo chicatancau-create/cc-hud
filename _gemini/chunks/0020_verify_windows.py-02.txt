@@ -1,0 +1,98 @@
+    proc = subprocess.Popen([sys.executable, str(ROOT / "cc-hud.pyw")], cwd=str(ROOT), env=env)
+
+    deadline = time.time() + args.timeout
+    data: dict = {}
+    while time.time() < deadline:
+        if runtime.exists():
+            try:
+                data = json.loads(runtime.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                data = {}
+            if data.get("ready"):
+                break
+        if proc.poll() is not None:
+            break
+        time.sleep(0.4)
+    # 托盘在 GUI 线程里异步建立：等它落账再判定，否则会把「还没建」误判成「建不成」
+    deadline2 = time.time() + 12
+    while time.time() < deadline2:
+        if data.get("tray_added") is not None:
+            break
+        if proc.poll() is not None:
+            break
+        time.sleep(0.3)
+        try:
+            data = json.loads(runtime.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+
+    checks: dict[str, dict] = {}
+
+    def check(name: str, ok: bool, detail) -> None:
+        checks[name] = {"ok": bool(ok), "detail": detail}
+
+    own_pid = int(data.get("pid") or 0)
+    cand = int(data.get("hwnd") or 0)
+    if not cand or owner_pid(cand) != own_pid:
+        cand = find_owned("cc-hud", own_pid)
+    hwnd = cand if cand and own_pid and owner_pid(cand) == own_pid else 0
+    if hwnd:
+        deadline2 = time.time() + args.wait
+        while time.time() < deadline2:
+            try:
+                data = json.loads(runtime.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
+            if not args.selftest or data.get("selftest_result"):
+                break
+            time.sleep(0.5)
+        try:
+            data = json.loads(runtime.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+
+    check("process_alive", proc.poll() is None, proc.poll())
+    check("runtime_json", bool(data), str(runtime))
+    check("window_created", bool(hwnd), hwnd)
+    check("main_title", find("cc-hud") is not None, find("cc-hud"))
+    # 第二窗口已删除：任何时刻都不允许存在 cc-hud-dot
+    dot_hwnd0 = find_owned("cc-hud-dot", own_pid)
+    check("no_dot_window", dot_hwnd0 == 0 and not data.get("dot_created"), {
+        "hwnd": dot_hwnd0 or None, "dot_created": data.get("dot_created")})
+    check("single_window_only", bool(data.get("main_created")) and not data.get("dot_created"),
+          {"main_created": data.get("main_created"), "dot_created": data.get("dot_created")})
+    check("file_url", str(data.get("dist", "")).startswith("file://"), data.get("dist"))
+    check("tray_added", bool(data.get("tray_added")), data.get("tray_added"))
+    if args.selftest:
+        try:
+            data = json.loads(runtime.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    if args.selftest == "power":
+        raw = data.get("selftest_result") or {}
+        if isinstance(raw, dict):
+            info = raw
+        else:
+            try:
+                info = json.loads(raw)
+            except (TypeError, ValueError):
+                info = {}
+        check("selftest_power",
+              info.get("unconfirmed", {}).get("ok") is False and info.get("confirmed", {}).get("ok") is True,
+              info or {"raw": raw, "type": type(raw).__name__})
+    if args.selftest == "export":
+        raw = data.get("selftest_result") or {}
+        if isinstance(raw, dict):
+            info = raw
+        else:
+            try:
+                info = json.loads(raw)
+            except (TypeError, ValueError):
+                info = {}
+        path = info.get("path")
+        check("selftest_export", bool(info.get("revision")) and bool(path) and os.path.exists(path), info)
+    check("dpi", int(data.get("dpi") or 0) >= 96, data.get("dpi"))
+    pid = int(data.get("pid") or 0)
+    aw = process_dpi_awareness(pid) if pid else None
+    check("dpi_aware_per_monitor", aw == 2, {"pid": pid, "awareness": aw})
+    mons = monitors()

@@ -1,0 +1,73 @@
+- 镂空：`hollow_colorkey` / `hollow_bg_transparent` 均 PASS（`windows-verify-FINAL-hollow3.json`）。
+
+截图：
+
+- `artifacts/before/` 旧版小卡/展开/今日柱（重构前）
+- `artifacts/windows/FINAL-card.png`、`FINAL-insights.png`、`windows-peek-dot.png`（WebView2 实机）
+- `artifacts/web/insights.png`、`card.png`、`diagnostics.png`、`settings.png`、`empty.png`、`unsupported.png`、`narrow-420.png`（Playwright）
+
+## 5. 数据对账（真实本机账；门禁：`python tools/reconcile.py` → RC=0，2026-11-08 00:26）
+
+`tools/reconcile.py` 额外断言：每路 `reqs==Σdays`、`reqs==Σhours`、`totals==Σdaily`，四范围任何一项失败即退出码 1。
+本次实测四范围 `bad=none`。
+
+| 范围 | 耗时 | tokens | 请求 | 成本 | credits | 会话 | 守恒 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| 1d | 10.42s（冷） | 264,803,070 | 194 | $3.19 | — | 6 | 11 项 + 逐路等式，bad=none |
+| 7d | 4.75s | 1,180,686,499 | 10,662 | $136.70 | — | 64 | 20 项，bad=none |
+| 30d | 1.53s | 2,787,717,042 | 22,152 | $369.10 | — | 1,069 | 26 项，bad=none |
+| all | 3.04s | 3,464,881,445 | 55,703 | $423.15 | — | 1,310 | 29 项，bad=none |
+
+来源状态（all）：ccswitch/cchaha/qoder/qoder_cn/zcode/herdsman/codex/workbuddy/workbuddy_ai 均 `ok`；
+`dsh` = `empty`（projcache 会话不在范围/为空），`dsh_v4` = `unsupported`（V4 无结构化 usage，按要求不伪造）。
+本轮真实数据无会话 id 交集，`suppressed` 逻辑由合成用例覆盖。
+表中数字为 WorkBuddy 跨文件去重、gap 源改用 `counted` 排除后的当前值。
+
+## 6. 独立审查（子代理）与已修问题
+
+审查代理返回 8 条，已修 4 条实质问题并补测试：
+
+1. 前端 seq 跨页面重载归零 → 宿主全局 `last_seq` 会把新请求判旧、永久 loading。改为 `Date.now()` 起点单调序列，stale 分支补 `setLoading(false)`；新增 Playwright「刷新页面」用例。
+2. `accounting.collect` 的 gap 源（Codex/DSH）只用 CC Switch sid 排除，可能与 cc-haha/Qoder/WorkBuddy 重叠双计。改为 `exclude_sids=counted` 并把 gap 源 sid 计入；新增 DSH 与 Qoder 同 sid 用例。
+3. `host._ensure_window_ready` 在成功前就置 `_initialized=True`，早期异常会让轮询线程不再重试。改为成功后置位、异常复位。
+4. WorkBuddy 无跨文件去重（复制/fork 会话会双计）。按 `(sid, 时刻, 模型, 四桶)` 去重；新增复制会话文件用例。
+
+未修（已记录）：托盘 WndProc 内写状态文件（GUI 线程 I/O）、缓存 payload 仅浅拷贝、`capture()` 可写页面传入的任意路径（本地 file:// 宿主）。
+
+## 7. 本轮定位并修复的宿主级问题
+
+1. **js_api 注入失败**：`Bridge` 的公开属性 `window_port` 被 pywebview 当作 API 序列化，触发
+   `CoreWebView2Controller ... only be accessed from the UI thread`，注入线程失败、前端回落桩数据。
+   修复：内部依赖改为下划线私有属性，js_api 只暴露方法。
+2. **loaded 事件 + React 首渲染竞态**：前端在 API 注入前就固定用桩。修复：轮询 `window.pywebview.api`
+   （file:// 6s，浏览器 1.5s），file:// 超时直接报错而不是用假数据。
+3. **Python 后台线程被 WinForms 循环饿死**：心跳 1s 后停止。修复：托盘事件在 WndProc（GUI 线程）同步处理，
+   周期刷新由前端 `setInterval` 调桥接（桥接走 .NET 线程，GIL 可用）。
+4. **125% DPI 下右侧被裁**：pywebview 按物理像素建窗、WebView2 按缩放渲染。修复：`documentElement.style.zoom = 1/devicePixelRatio`；
+   并让布局切换时按 424×330 / 1180×820 重新定位窗口。
+5. **分层窗口取证**：屏幕 BitBlt 会把桌面拍进来。修复：取证前临时 alpha=100%，PrintWindow 抓取后恢复。
+
+## 7. 未验证与限制（不冒充通过）
+
+| 项 | 状态 |
+|---|---|
+| 双显示器实机 | **未验证**：本机仅 1 台显示器；多屏代码路径（EnumDisplayMonitors/工作区夹取）已实现并有单测级辅助，但没有第二块屏可实测 |
+| 非 125% DPI（100%/150%） | **部分验证**：未改系统缩放；强制 WebView2 `--force-device-scale-factor`：
+1 → `dpr=1`、`innerWidth=2184`、整页无裁切（`DPI100-forced.png`）；1.5 → `dpr=1.5`、`innerWidth=1456`、整页无裁切（`DPI150-forced.png`）。
+系统级 DPI 档位本身未切换 |
+| 托盘图标像素级取证 | **未完成**：`tray_added=true`（NIM_ADD 成功），但 `Shell_NotifyIconGetRect` 未返回矩形、通知区域裁剪图未命中强调色像素——图标很可能在任务栏溢出区（“^”），本工具未能展开取证。不据此宣称像素级通过 |
+| 长会话/超大 transcript 压测 | **已做**：20k+5k 单测；10 万 cc-haha + 2 万 WorkBuddy 基准 `tools/bench_long.py` → 2026-11-08 复测冷 1.71s / 热 0.41s（早前 1.01/0.34），reqs 120,000、守恒 8 项全绿 |
+| WebView2 内电源二次确认 | **已实机验证（假执行器）**：`selftest_power` PASS，`confirmed.fake=true`，未执行真实命令 |
+| 大面板内的导出按钮 | **已实机验证**：`verify_windows.py --selftest export` 通过（revision 1、文件存在）；电源按钮仍由 Playwright 覆盖，未在 WebView2 点击 |
+| 会话网格 | 已在 WebView2 实机截图 `FINAL2-sessions2.png`：搜索、来源 chips、12/页分页、真实会话 id/模型/tokens/成本或 credits |
+| 耗时/工具 tally | 已实现并入快照与 UI：30d 实测工具 `Read 132 / Bash 127 / Grep 54 / Edit 41`；耗时 `P50 11.10s / TTFT P50 5.70s / 样本 7,129`（`FINAL7-30d.png`）；命令 tally 与上下文构成仍未做（数据不可得） |
+| 视觉逐像素差异 | 已出并排图 `artifacts/visual-diff.png` 与差异报告 `docs/reports/2026-11-07-visual-diff.md`；三处内容缺失为数据不可得（耗时/工具 tally/上下文构成），已逐条解释；未做 SSIM 数值 |
+| 旧 `verify.py` A–Z | 未改造为适配新宿主；旧版回退入口不受影响 |
+| 电源真实动作 | 按约束从未执行（测试注入 FakePower） |
+
+## 8. 复现命令
+
+```bash
+# 后端
+.venv/Scripts/python.exe -m pytest tests_py -q
+# 前端

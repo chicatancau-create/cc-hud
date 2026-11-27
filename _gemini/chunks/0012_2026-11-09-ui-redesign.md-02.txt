@@ -1,0 +1,81 @@
+`container-type: inline-size`。**实测没有匹配**：
+
+- `--size 900x820` → `inner_width = 886` CSS px，886 明显小于 980，
+  但 `.first` 仍是两列（KPI 左、图表右）；
+- 本机 WebView2 版本实测 `157.0.4341.42`
+  （`HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}` 的 `pv`，
+  `C:\Program Files (x86)\Microsoft\EdgeWebView\Application` 下有 156/157 两版），
+  该版本理应支持容器查询。
+
+改成**媒体查询**后同一尺寸立刻单列堆叠（`narrow900b`），886 与 700 两档都验证过。
+本应用窗口宽 == 视口宽，媒体查询与容器查询等价，因此这是无损替换；
+`.page` 上的 `container-type: inline-size` 已删除，避免留下无效声明。
+
+断点：980（`.first` 单列）/ 780（`.stats`、`.tiles` 单列）/ 640（`.kpis` 两列）/ 470（`.kpis` 单列）。
+
+---
+
+## 5. 验证
+
+### 5.1 截图
+`artifacts/visual/`：
+
+| 文件 | 内容 |
+|---|---|
+| `base-*-desk.png` | 改前四视图基线 |
+| `v2..v6-*.png` | 逐轮迭代（含浅色主题） |
+| `final-*-desk.png` | 改后四视图（深色，生产尺寸） |
+| `light2-card-desk.png`、`light-insights-desk.png`、`light-settings-desk.png` | 改后浅色主题 |
+| `narrow900b-desk.png`、`narrow700-desk.png` | 窄窗重排（886 / 700 CSS px） |
+
+实测窗口尺寸（设备像素 @ dpr 1.25）：小卡 530×412、洞察 1475×1000、诊断 1350×950、设置 950×800。
+
+### 5.2 门禁（全部真实 rc）
+
+| 门禁 | 结果 |
+|---|---|
+| `pytest` | **95 passed**（`artifacts/audit/pytest-ui.xml`：tests=95 fail=0 err=0 skip=0） |
+| `tools/reconcile.py` | rc=0，四范围 `bad=none`（1d 198,244,891/3,278；7d 1,779,197,202/18,912；30d 3,395,915,595/30,020；all 4,054,260,096/63,238） |
+| `npm run lint` | rc=0 |
+| `npm run typecheck` | rc=0 |
+| `npm test` | **25 passed**（4 文件） |
+| `npm run build` | 成功，`dist/assets/index-CWjhSTBw.css` 21.21 kB / `index-OHGIrBpj.js` 190.59 kB（gzip 59.67） |
+| `tools/verify_windows.py --layout card` | 全 `[PASS]`（capture 530×412） |
+| `tools/verify_layout_switch.py` | `{"ok": true}`，system / 96 / 144 三轮全 ok |
+
+### 5.3 顺手修的非视觉 bug
+
+`tools/verify_windows.py:105` 的 `CC_HUD_MUTEX=f"Local\cc-hud-verify-..."` 含无效转义 `\c`，
+每次运行抛 `SyntaxWarning: "\c" is an invalid escape sequence`（`-W error` 下直接失败）。
+改成 `rf"Local\cc-hud-verify-..."` 后同一命令 rc=0 且无警告。
+
+### 5.4 首帧范围错位（截图才发现的真 bug）
+
+拍「已提交构建」的四视图时拍到了自相矛盾的一幕：**分段控件高亮「7 天」，画面却是 1 天的数据**
+（3,346 请求 / $28.48，与 `reconcile.py` 的 1d 行吻合）。
+
+根因（`web/src/App.tsx:51` + `web/src/state/useSnapshot.ts:53`）：
+`range` 初值是本地默认 `"1d"`，而 `useSnapshot` 一挂载就按它扫描账本 ——
+一次全量账本读取要 5–8 秒。等 `bootstrap()` 回来把 `range` 改成服务端真值 `"7d"` 时，
+那次 1d 的扫描往往已经返回并渲染到画面上了，于是出现「按钮 7 天 + 数据 1 天」，
+并且白做一次 1d 全量扫描。
+
+修法：给 `useSnapshot` 加 `enabled` 门，`boot === null` 时不发请求（`useSnapshot(api, range, boot !== null)`），
+boot 回包（含服务端 range）到了才开始扫。
+
+验证：`web/src/app.test.tsx` 新增用例「bootstrap 返回前不请求快照；只按服务端 range 请求一次」，
+断言 `snapshot` 只被调用 1 次且参数是 `"7d"`。
+**反证**：把 `if (!enabled) return;` 注释掉，该用例立刻红 ——
+`expected "snapshot" to be called 1 times, but got 2 times`；恢复后 25 passed。
+重拍小卡确认按钮与数据一致（$350 / 17.86亿 / 19,033 请求）。
+
+---
+
+## 6. 没做 / 判不了
+
+1. **托盘图标可见性、圆点点击恢复**：仍未实机证实（沿用 `docs/reports/2026-11-09-doc-errata.md` 的 E4/E5 结论）。
+2. **多显示器**：`multi_monitor: "blocked: only 1 display"`，本机只有一块屏，判不了。
+3. **浅色主题在真实桌面混合下的观感**：截图固定 `CC_HUD_ALPHA=1`，与用户实际半透明叠桌面不同。
+   截图只能证明「配色对比度够」，不能证明「叠在任意壁纸上都好看」。
+4. **小卡 424×330 的高度余量**：仍是手算 + 截图目视确认，没有自动化的「内容不溢出」断言。
+5. `@container` 为何在 WebView2 157 上不匹配 —— 只确认了现象并绕开，没有查到底。

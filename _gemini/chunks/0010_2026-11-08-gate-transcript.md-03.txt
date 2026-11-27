@@ -1,0 +1,44 @@
+FINAL8-insights.json                 ok=True fails=-
+FINAL8-peek.json                     ok=True fails=-
+FINAL9-card.json                     ok=True fails=-
+FINAL9-insights.json                 ok=True fails=-
+FINAL9-peek.json                     ok=True fails=-
+review-card.json                     ok=False fails=['tray_added']
+review-card2.json                    ok=True fails=-
+review-insights.json                 ok=True fails=-
+settings-persist.json                ok=True fails=-
+tray-click.json                      ok=True fails=-
+tray-hover.json                      tray_added=True unnamed=1 tooltip=captured
+tray-uia.json                        tray_added=True uia_ok=False reason=overflow opened but no cc-hud item
+windows-card-2.json                  ok=True fails=-
+windows-card-3.json                  ok=True fails=-
+windows-card-final.json              ok=True fails=-
+windows-card-final2.json             ok=True fails=-
+windows-card.json                    ok=True fails=-
+windows-insights-bitblt.json         ok=True fails=-
+windows-insights-final.json          ok=True fails=-
+windows-insights-final10.json        ok=True fails=-
+windows-insights-final11.json        ok=True fails=-
+windows-insights-final12.json        ok=True fails=-
+windows-insights-final13.json        ok=True fails=-
+windows-insights-final2.json         ok=True fails=-
+windows-insights-final3.json         ok=True fails=-
+windows-insights-final4.json         ok=True fails=-
+windows-insights-final5.json         ok=True fails=-
+windows-insights-final6.json         ok=True fails=-
+windows-insights-final7.json         ok=True fails=-
+windows-insights-final8.json         ok=True fails=-
+windows-insights-final9.json         ok=True fails=-
+windows-insights.json                ok=True fails=-
+windows-peek.json                    ok=True fails=-
+```
+
+说明：`FINAL*`/`EXPO2` 为最终轮证据；其余为过程快照。
+过程快照中的失败项均已被后续轮次覆盖：
+`FINAL-hollow*.json` → `FINAL-hollow3.json`（flags=3），
+`FINAL-power*.json` → `FINAL-power5.json`（假执行器确认），
+`FINAL3-export*.json` → `EXPO2.json`（revision + 落盘）。
+
+## 结论
+
+自动化门禁退出码：全部为 0
